@@ -57,6 +57,11 @@ loader-spike = "mojo run src/loader_spike.mojo"
 # Mojo, verified byte-identical to transformers (needs `tok-capture` first).
 tok-spike = "mojo run src/tokenizer_spike.mojo"
 
+# Phase 3 full forward pass (ARCHITECTURE.md §6): embed -> 24 layers -> norm ->
+# tied head on the GPU, verified vs HF per-layer + final logits (argmax).
+# Built (not `run`) for compiled-speed weight loading. Needs `forward-capture`.
+forward-spike = { cmd = "mkdir -p build && mojo build src/forward_spike.mojo -o build/forward_spike && ./build/forward_spike" }
+
 [feature.oracle.tasks]
 # Generates tests/fixtures/attention/{synthetic,real_L0,real_L23}/ : q/k/v.bin,
 # expected.bin (NumPy ref), meta.txt. Also asserts NumPy ref ≈ HF context.
@@ -68,3 +73,5 @@ kernels-capture = "python tests/manual/kernels_spike/capture.py"
 loader-capture = "python tests/manual/loader_spike/capture.py"
 # Dumps vocab/merges resolved to ids + expected encodings for the prompt corpus.
 tok-capture = "python tests/manual/tokenizer_spike/capture.py"
+# Dumps ids + per-layer hidden states + last-position logits from HF (CPU/f32).
+forward-capture = "python tests/manual/forward_spike/capture.py"

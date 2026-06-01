@@ -20,3 +20,7 @@ tests/fixtures/loader/
 # Tokenizer tables are large (151k vocab/merges); regenerate with `pixi run
 # tok-capture`.
 tests/fixtures/tokenizer/
+
+# Forward-pass reference hidden states are large; regenerate with `pixi run
+# forward-capture`.
+tests/fixtures/forward/

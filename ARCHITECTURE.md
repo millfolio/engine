@@ -266,7 +266,7 @@ positions), so it is verifiable in isolation with no other component built.
 | **0 — Scaffold** *(✅ done)* | pixi env (Mojo + GPU/Metal, nightly), repo layout, this doc. **A Mojo GPU hello kernel runs on the M4** — re-confirms max-backend rung 1 (hand-written Mojo Metal kernels execute *and* compute correctly) on a clean env, before betting the project on it. `pixi run gpu-hello` ✅. |
 | **1 — Attention + RoPE spike (the go/no-go gate)** *(✅ done — passed)* | The risky kernel, first and alone. A Mojo Metal kernel for RoPE (split-half, θ=1e6) + causal GQA attention at the real Qwen2 dims (head_dim 64, 14:2 heads), **diffed against a from-scratch NumPy reference** on both synthetic inputs and **captured-real layer Q/K/V fixtures from the model run** (so it is tested on realistic magnitudes, not just random). **Result: GPU output matches the reference to ≤ 8.4e-6 abs on synthetic + real layer-0 + real layer-23 — the kernel MAX got wrong on Metal, we got right.** See §11. |
 | **2 — Remaining kernels + loader + tokenizer** *(✅ done)* | matmul/RMSNorm/SwiGLU GPU kernels (matmul bit-exact, others ≤ 4.5e-6 vs NumPy on real layer-0); safetensors loader (bf16→f32, bit-exact vs torch on 6 real tensors); byte-level BPE encode/decode **byte-identical to transformers** on the English corpus (ASCII-correct pretokenizer; non-ASCII `\p{L}`/`\p{N}` deferred). See §11 #4–6. |
-| **3 — Forward pass** | Assemble embed → 24 layers → final norm → tied head on GPU/f32. **Logits match MAX-CPU/f32** at the last prompt position (greedy argmax agrees). Layer-bisection (force 1/2/24 layers) localizes any divergence — the exact technique max-backend used (its §8 #2 rung 6). |
+| **3 — Forward pass** *(✅ done)* | embed → 24 layers → final norm → tied head on GPU/f32, real weights loaded from safetensors. **Greedy next-token argmax agrees with HF/CPU** (785, `'The'`); per-layer hidden drift ≤ 2.5e-3 over 24 layers (pure f32 accumulation). Per-layer comparison gives the layer-bisection (max-backend §8 #2 rung 6). See §11 #7. |
 | **4 — Decode loop + KV cache** | Prefill + incremental greedy decode on-device, EOS handling, `--max-tokens`. **Token-for-token greedy parity** with MAX-CPU on the conformance prompts (§7). |
 | **5 — Sampling** | temperature/top-k/top-p/repetition-penalty per `generation_config.json` (§5.6). |
 | **6 — Serve** | Port max-backend's flare HTTP layer (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) onto this engine — now a *pure-Mojo, GPU* request path end to end, **no Python/MAX at runtime**. |
@@ -297,9 +297,10 @@ checked against a trusted oracle.
      against the reference for the same inputs — the rung-by-rung ladder
      max-backend built (its §8 #2 rungs 1–6), now applied to *our* kernels.
      **Attention+RoPE done — ≤ 8.4e-6 (§11 #1).**
-  3. **Logits:** GPU last-position logits ≈ MAX-CPU within f32 tolerance, and
-     `argmax` agrees exactly. Bisect by layer count (force 1/2/24 layers) to
-     localize any divergence (max-backend §8 #2 rung 6).
+  3. **Logits:** GPU last-position logits ≈ reference within f32 tolerance, and
+     `argmax` agrees exactly. Bisect by layer count to localize any divergence
+     (max-backend §8 #2 rung 6). **Done — argmax agrees, per-layer drift ≤ 2.5e-3
+     (§11 #7).**
   4. **Generation:** greedy continuation is **token-for-token identical** to
      MAX-CPU for N tokens on a fixed prompt set.
 - **Corpus:** a handful of fixed prompts (single-turn, multi-turn,
@@ -432,3 +433,17 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
    — fine for the English corpus, to revisit before multilingual input.
    `pixi run tok-capture` then `pixi run tok-spike`. **Phase 2 is complete; every
    piece the forward pass needs is verified.**
+
+### Phase-3 result
+
+7. **The whole model runs on the GPU and matches HF (Phase 3, ✅).** The full
+   Qwen2.5-0.5B forward pass — real safetensors weights (bf16→f32, bulk-loaded
+   via host buffer + `memcpy` + a GPU convert kernel) → embed → 24 decoder layers
+   → final RMSNorm → tied LM head — runs entirely on the M4 in float32. Verified
+   against HF/CPU/f32 (`forward-capture`): embedding **exact**, per-layer
+   residual-stream hidden drift **≤ 2.5e-3** across all 24 layers (f32
+   accumulation, monotone and tiny — no bisection failure), final-norm 1.4e-3,
+   and the **greedy next-token argmax agrees exactly** (785 → `'The'`). Kernels
+   live in the reusable `src/kernels.mojo`. `pixi run forward-capture` then
+   `pixi run forward-spike`. **The GPU-only native-Mojo Qwen2 is real; only the
+   decode loop (Phase 4) stands between this and generated text.**
