@@ -511,13 +511,20 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
     `recv`/`send` via `external_call`): a single-threaded blocking accept loop
     that loads the model once and answers `GET /v1/models` and
     `POST /v1/chat/completions` with real ChatCompletion JSON. Verified live:
-    "What is the capital of France?" → `The capital of France is Paris.`; "Name
-    three primary colors." → `Three primary colors are red, blue, and yellow.`
-    Minimal (no SSE streaming, no concurrency, crude last-`"content"` request
-    parse). **The whole path — socket → tokenizer → GPU model → tokenizer → JSON
-    — is pure Mojo with no Python and no MAX at runtime: the stance max-backend
-    set out with and had to defer is met end to end.** `pixi run serve`.
-    Re-port to flare if/when it supports a Mojo that also runs the GPU engine.
+    "What is the capital of France?" → `The capital of France is Paris.`
+    It parses the request body with minja2's `parse_json` and **honors OpenAI
+    request params**: full `messages` history + `tools` (§5.3), `max_tokens`
+    (→ `finish_reason` `stop`/`length`), and `temperature`/`top_p`/`top_k` —
+    greedy when `temperature` is absent or 0, else the Phase-5 sampler (§11 #9).
+    Responses carry a `usage` block (prompt/completion/total tokens). Output is
+    assembled at the **byte level** so multibyte UTF-8 survives (e.g. "Café
+    Rétro", "Pâte feuille") — building strings with `chr(byte)` per byte
+    mojibakes non-ASCII; `chat.json_escape_str` + `bytes_to_string` fix it.
+    **The whole path — socket → tokenizer → GPU model → tokenizer → JSON — is
+    pure Mojo with no Python and no MAX at runtime: the stance max-backend set
+    out with and had to defer is met end to end.** Still minimal: no SSE
+    streaming, no concurrency. `pixi run serve`. Re-port to flare if/when it
+    supports a Mojo that also runs the GPU engine.
 
 ## 12. Code layout
 

@@ -20,6 +20,7 @@ from std.gpu.host import DeviceContext
 from model import load_weights, generate, EOS1, EOS2
 from tokenizer import load_tokenizer
 from chat import load_chat_template, render_chat
+from json import bytes_to_string
 
 comptime MAX_NEW = 64
 comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"
@@ -35,12 +36,6 @@ def to_bytes(s: String) -> List[UInt8]:
     for i in range(len(sb)):
         out.append(sb[i])
     return out^
-
-def ascii_str(bytes: List[UInt8]) -> String:
-    var s = String("")
-    for i in range(len(bytes)):
-        s += chr(Int(bytes[i]))
-    return s^
 
 def main() raises:
     var user = String("What is the capital of France?")
@@ -73,4 +68,4 @@ def main() raises:
         body.append(gen[i])
 
     print("\n>>> ", user, sep="")
-    print(ascii_str(tok.decode(body)))
+    print(bytes_to_string(tok.decode(body)))

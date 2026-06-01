@@ -18,15 +18,25 @@ non-streaming ChatCompletion. Enough to point a client at and get real text.
 from std.ffi import external_call, c_int
 from std.gpu.host import DeviceContext
 
-from model import Weights, load_weights, generate, EOS1, EOS2
+from model import Weights, load_weights, generate, generate_sample, EOS1, EOS2
 from tokenizer import Tokenizer, load_tokenizer
-from chat import load_chat_template, render_request, json_escape
+from chat import load_chat_template, render_value, json_escape_str
+from value import Value
+from json import parse_json, bytes_to_string
 
 comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"
+# minja2 Value tags (value.mojo)
+comptime VBOOL = 2
+comptime VINT = 3
+comptime VFLOAT = 4
+# sampling defaults (generation_config.json) when temperature > 0
+comptime DEF_TOPK = 20
+comptime DEF_TOPP = Float32(0.8)
+comptime DEF_REP = Float32(1.1)
+comptime DEF_MAXNEW = 256
 
 comptime PORT_HI = 0x1F        # 8000 = 0x1F40, big-endian
 comptime PORT_LO = 0x40
-comptime MAX_NEW = 128
 comptime SOL_SOCKET = 0xFFFF   # macOS
 comptime SO_REUSEADDR = 0x0004
 
@@ -42,11 +52,26 @@ def to_bytes(s: String) -> List[UInt8]:
         out.append(sb[i])
     return out^
 
-def ascii_str(bytes: List[UInt8]) -> String:
-    var s = String("")
-    for i in range(len(bytes)):
-        s += chr(Int(bytes[i]))
-    return s^
+def get_int(req: Value, key: String, default: Int) -> Int:
+    var o = req.map_get(key)
+    if o:
+        var v = o.value()
+        if v.tag == VINT:
+            return v.i
+        if v.tag == VFLOAT:
+            return Int(v.f)
+    return default
+
+def get_float(req: Value, key: String, default: Float64) -> Float64:
+    var o = req.map_get(key)
+    if o:
+        var v = o.value()
+        if v.tag == VFLOAT:
+            return v.f
+        if v.tag == VINT:
+            return Float64(v.i)
+    return default
+
 
 def http_body(req: String) -> String:
     """The bytes after the blank line separating HTTP headers from the body."""
@@ -108,22 +133,39 @@ def main() raises:
             http_response(conn, String('{"object":"list","data":[{"id":"qwen2.5-0.5b-instruct","object":"model","owned_by":"millrace"}]}'))
         else:
             try:
-                var prompt = render_request(tmpl, http_body(req))
-                var ids = tok.encode(to_bytes(prompt))
-                var gen = generate(ctx, w, ids, MAX_NEW)
+                var body_v = parse_json(http_body(req))
+                var ids = tok.encode(to_bytes(render_value(tmpl, body_v)))
+
+                # OpenAI request knobs: greedy unless temperature > 0.
+                var max_new = get_int(body_v, "max_tokens", DEF_MAXNEW)
+                var temp = Float32(get_float(body_v, "temperature", 0.0))
+                var gen: List[Int]
+                if temp > 0.0:
+                    var top_p = Float32(get_float(body_v, "top_p", Float64(DEF_TOPP)))
+                    var top_k = get_int(body_v, "top_k", DEF_TOPK)
+                    gen = generate_sample(ctx, w, ids, max_new, temp, top_k, top_p, DEF_REP, UInt64(0))
+                else:
+                    gen = generate(ctx, w, ids, max_new)
+
                 var body_ids = List[Int]()
+                var stopped = False
                 for i in range(len(gen)):
                     if gen[i] == EOS1 or gen[i] == EOS2:
+                        stopped = True
                         break
                     body_ids.append(gen[i])
-                var text = ascii_str(tok.decode(body_ids))
-                print("  reply:  ", text, sep="")
+                var dec = tok.decode(body_ids)
+                print("  reply:  ", bytes_to_string(dec), sep="")
+                var finish = String("stop") if stopped else String("length")
                 var json = String('{"id":"chatcmpl-millrace","object":"chat.completion","model":"qwen2.5-0.5b-instruct",')
                 json += '"choices":[{"index":0,"message":{"role":"assistant","content":"'
-                json += json_escape(text)
-                json += '"},"finish_reason":"stop"}]}'
+                json += json_escape_str(dec)
+                json += '"},"finish_reason":"' + finish + '"}],'
+                json += '"usage":{"prompt_tokens":' + String(len(ids))
+                json += ',"completion_tokens":' + String(len(body_ids))
+                json += ',"total_tokens":' + String(len(ids) + len(body_ids)) + "}}"
                 http_response(conn, json)
             except e:
                 print("  error: ", String(e), sep="")
-                http_response(conn, String('{"error":{"message":"') + json_escape(String(e)) + '"}}')
+                http_response(conn, String('{"error":{"message":"') + json_escape_str(to_bytes(String(e))) + '"}}')
         _ = external_call["close", c_int](conn)

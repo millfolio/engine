@@ -11,27 +11,34 @@ under the same 1.0.0b2 nightly the GPU engine needs — unlike flare, §11 #11).
 
 from template import Template
 from value import Value
-from json import parse_json
+from json import parse_json, bytes_to_string, string_to_bytes
 
 
-def json_escape(s: String) -> String:
-    var out = String("")
-    var sb = s.as_bytes()
-    for i in range(len(sb)):
-        var c = Int(sb[i])
-        if c == 34:
-            out += "\\\""
-        elif c == 92:
-            out += "\\\\"
+def json_escape_str(b: List[UInt8]) -> String:
+    """JSON-escape UTF-8 bytes into a string. Operates at the byte level so
+    multibyte UTF-8 (é, emoji, CJK…) passes through intact — building the string
+    with `chr(byte)` per byte would mojibake it."""
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        var c = Int(b[i])
+        if c == 34:  # "
+            out.append(92)
+            out.append(34)
+        elif c == 92:  # backslash
+            out.append(92)
+            out.append(92)
         elif c == 10:
-            out += "\\n"
+            out.append(92)
+            out.append(110)  # \n
         elif c == 13:
-            out += "\\r"
+            out.append(92)
+            out.append(114)  # \r
         elif c == 9:
-            out += "\\t"
+            out.append(92)
+            out.append(116)  # \t
         else:
-            out += chr(c)
-    return out^
+            out.append(b[i])
+    return bytes_to_string(out)
 
 
 def load_chat_template(path: String) raises -> Template:
@@ -39,15 +46,14 @@ def load_chat_template(path: String) raises -> Template:
         return Template.compile(f.read())
 
 
-def render_request(tmpl: Template, body: String) raises -> String:
-    """Render the template from an OpenAI-style request body.
+def render_value(tmpl: Template, req: Value) raises -> String:
+    """Render the template from an already-parsed OpenAI request `Value`.
 
-    The body's `messages` (full multi-turn history, with any `tool_calls`) and
+    The request's `messages` (full multi-turn history, with any `tool_calls`) and
     optional `tools` are exactly the shape the Qwen template consumes — the same
-    inputs transformers' apply_chat_template takes — so we parse the request JSON
-    and pass them straight through, adding `add_generation_prompt`.
+    inputs transformers' apply_chat_template takes — so we pass them straight
+    through, adding `add_generation_prompt`.
     """
-    var req = parse_json(body)
     var msgs = req.map_get("messages")
     if not msgs:
         raise Error("request has no 'messages' array")
@@ -65,9 +71,16 @@ def render_request(tmpl: Template, body: String) raises -> String:
     return tmpl.render(ctx^, 0)
 
 
+def render_request(tmpl: Template, body: String) raises -> String:
+    """Parse an OpenAI request body and render it (CLI / single-shot use)."""
+    return render_value(tmpl, parse_json(body))
+
+
 def render_chat(tmpl: Template, user: String) raises -> String:
     """Convenience for a single user turn (the CLI), via `render_request`."""
     var body = (
-        String('{"messages":[{"role":"user","content":"') + json_escape(user) + '"}]}'
+        String('{"messages":[{"role":"user","content":"')
+        + json_escape_str(string_to_bytes(user))
+        + '"}]}'
     )
     return render_request(tmpl, body)
