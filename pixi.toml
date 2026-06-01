@@ -62,6 +62,10 @@ tok-spike = "mojo run src/tokenizer_spike.mojo"
 # Built (not `run`) for compiled-speed weight loading. Needs `forward-capture`.
 forward-spike = { cmd = "mkdir -p build && mojo build src/forward_spike.mojo -o build/forward_spike && ./build/forward_spike" }
 
+# Phase 4 greedy decode + KV cache (ARCHITECTURE.md §5.4–5.5): prefill then
+# incremental decode; checked token-for-token vs HF. Needs `generate-capture`.
+generate-spike = { cmd = "mkdir -p build && mojo build src/generate_spike.mojo -o build/generate_spike && ./build/generate_spike" }
+
 [feature.oracle.tasks]
 # Generates tests/fixtures/attention/{synthetic,real_L0,real_L23}/ : q/k/v.bin,
 # expected.bin (NumPy ref), meta.txt. Also asserts NumPy ref ≈ HF context.
@@ -75,3 +79,5 @@ loader-capture = "python tests/manual/loader_spike/capture.py"
 tok-capture = "python tests/manual/tokenizer_spike/capture.py"
 # Dumps ids + per-layer hidden states + last-position logits from HF (CPU/f32).
 forward-capture = "python tests/manual/forward_spike/capture.py"
+# Dumps prompt ids + HF greedy continuation token ids.
+generate-capture = "python tests/manual/generate_spike/capture.py"

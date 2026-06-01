@@ -267,7 +267,7 @@ positions), so it is verifiable in isolation with no other component built.
 | **1 — Attention + RoPE spike (the go/no-go gate)** *(✅ done — passed)* | The risky kernel, first and alone. A Mojo Metal kernel for RoPE (split-half, θ=1e6) + causal GQA attention at the real Qwen2 dims (head_dim 64, 14:2 heads), **diffed against a from-scratch NumPy reference** on both synthetic inputs and **captured-real layer Q/K/V fixtures from the model run** (so it is tested on realistic magnitudes, not just random). **Result: GPU output matches the reference to ≤ 8.4e-6 abs on synthetic + real layer-0 + real layer-23 — the kernel MAX got wrong on Metal, we got right.** See §11. |
 | **2 — Remaining kernels + loader + tokenizer** *(✅ done)* | matmul/RMSNorm/SwiGLU GPU kernels (matmul bit-exact, others ≤ 4.5e-6 vs NumPy on real layer-0); safetensors loader (bf16→f32, bit-exact vs torch on 6 real tensors); byte-level BPE encode/decode **byte-identical to transformers** on the English corpus (ASCII-correct pretokenizer; non-ASCII `\p{L}`/`\p{N}` deferred). See §11 #4–6. |
 | **3 — Forward pass** *(✅ done)* | embed → 24 layers → final norm → tied head on GPU/f32, real weights loaded from safetensors. **Greedy next-token argmax agrees with HF/CPU** (785, `'The'`); per-layer hidden drift ≤ 2.5e-3 over 24 layers (pure f32 accumulation). Per-layer comparison gives the layer-bisection (max-backend §8 #2 rung 6). See §11 #7. |
-| **4 — Decode loop + KV cache** | Prefill + incremental greedy decode on-device, EOS handling, `--max-tokens`. **Token-for-token greedy parity** with MAX-CPU on the conformance prompts (§7). |
+| **4 — Decode loop + KV cache** *(✅ done)* | Prefill + incremental greedy decode on-device (per-layer KV cache, RoPE-by-cache-row so a step is O(positions)), EOS handling. **Token-for-token greedy parity with HF**: "What is the capital of France?" → `The capital of France is Paris.` + EOS, all 8 ids identical. See §11 #8. |
 | **5 — Sampling** | temperature/top-k/top-p/repetition-penalty per `generation_config.json` (§5.6). |
 | **6 — Serve** | Port max-backend's flare HTTP layer (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) onto this engine — now a *pure-Mojo, GPU* request path end to end, **no Python/MAX at runtime**. |
 | **Later — bf16 GPU** | bf16-native device compute (§4) once it matches the f32 reference. |
@@ -302,7 +302,8 @@ checked against a trusted oracle.
      (max-backend §8 #2 rung 6). **Done — argmax agrees, per-layer drift ≤ 2.5e-3
      (§11 #7).**
   4. **Generation:** greedy continuation is **token-for-token identical** to
-     MAX-CPU for N tokens on a fixed prompt set.
+     the reference for N tokens on a fixed prompt set. **Done — 8/8 ids match HF
+     incl. EOS (§11 #8).**
 - **Corpus:** a handful of fixed prompts (single-turn, multi-turn,
   system+user) rendered through minja2, mirroring minja2's context corpus.
 - Because these checks need the **GPU + weights + MAX**, they live under
@@ -447,3 +448,17 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
    live in the reusable `src/kernels.mojo`. `pixi run forward-capture` then
    `pixi run forward-spike`. **The GPU-only native-Mojo Qwen2 is real; only the
    decode loop (Phase 4) stands between this and generated text.**
+
+### Phase-4 result
+
+8. **The model generates correct text, token-for-token with HF (Phase 4, ✅).**
+   A greedy decode loop with a per-layer KV cache (raw K/V cached at row = absolute
+   position; `attn_cached_kernel` applies RoPE by row, so each decode step costs
+   O(positions), not O(T²)) runs prefill → incremental decode → EOS stop entirely
+   on the GPU. For "What is the capital of France?" it produces
+   `The capital of France is Paris.` + `<|im_end|>` — **all 8 token ids identical
+   to HF greedy generation** (`[785, 6722, 315, 9625, 374, 12095, 13, 151645]`).
+   `pixi run generate-capture` then `pixi run generate-spike`. **End to end, the
+   pure-Mojo GPU engine reproduces the reference — matching logits became matching
+   text.** Remaining: per-request sampling (Phase 5) and the flare HTTP server
+   (Phase 6); the inference core is done.

@@ -24,3 +24,7 @@ tests/fixtures/tokenizer/
 # Forward-pass reference hidden states are large; regenerate with `pixi run
 # forward-capture`.
 tests/fixtures/forward/
+
+# Generation fixtures reference a machine-specific checkpoint path; regenerate
+# with `pixi run generate-capture`.
+tests/fixtures/generate/

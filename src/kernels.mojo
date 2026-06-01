@@ -144,6 +144,86 @@ def silu_mul_kernel[
     Y[i] = rebind[Y.ElementType]((a / (1.0 + exp(-a))) * b)
 
 
+def copy_kernel[
+    LT: TensorLayout
+](
+    src: TileTensor[DType.float32, LT, MutAnyOrigin],
+    dst: TileTensor[DType.float32, LT, MutAnyOrigin],
+    dst_offset: Int,
+    n: Int,
+):
+    comptime assert dst.flat_rank == 1
+    var i = global_idx.x
+    if i >= n:
+        return
+    dst[dst_offset + i] = rebind[dst.ElementType](src[i])
+
+
+def attn_cached_kernel[
+    LT: TensorLayout
+](
+    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM] raw (pre-RoPE)
+    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] raw, row = abs position
+    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM]
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM]
+    Tq: Int,
+    q_offset: Int,
+):
+    """Attention of Tq queries (at absolute positions q_offset..q_offset+Tq-1)
+    over a KV cache. RoPE applied here using the cache row as the position, so
+    the cache stores raw K/V — no separate rope pass or rotated cache needed."""
+    comptime assert Q.flat_rank == 1
+    var h = global_idx.x % HQ
+    var t = global_idx.x // HQ
+    if t >= Tq:
+        return
+    var kvh = h // GROUP
+    var qpos = q_offset + t
+
+    var qbase = (t * HQ + h) * HEAD_DIM
+    var qr = InlineArray[Float32, HEAD_DIM](fill=0.0)
+    for d in range(HALF):
+        var freq = exp(-(2.0 * Float32(d) / Float32(HEAD_DIM)) * log(THETA))
+        var ang = Float32(qpos) * freq
+        var c = cos(ang)
+        var s = sin(ang)
+        var x0 = rebind[Scalar[DType.float32]](Q[qbase + d])
+        var x1 = rebind[Scalar[DType.float32]](Q[qbase + d + HALF])
+        qr[d] = x0 * c - x1 * s
+        qr[d + HALF] = x1 * c + x0 * s
+
+    var scale = 1.0 / sqrt(Float32(HEAD_DIM))
+    var m = Float32(-1.0e30)
+    var l = Float32(0.0)
+    var acc = InlineArray[Float32, HEAD_DIM](fill=0.0)
+
+    for j in range(qpos + 1):
+        var kbase = (j * HKV + kvh) * HEAD_DIM
+        var score = Float32(0.0)
+        for d in range(HALF):
+            var freq = exp(-(2.0 * Float32(d) / Float32(HEAD_DIM)) * log(THETA))
+            var ang = Float32(j) * freq
+            var c = cos(ang)
+            var s = sin(ang)
+            var x0 = rebind[Scalar[DType.float32]](Kc[kbase + d])
+            var x1 = rebind[Scalar[DType.float32]](Kc[kbase + d + HALF])
+            score += qr[d] * (x0 * c - x1 * s) + qr[d + HALF] * (x1 * c + x0 * s)
+        score *= scale
+
+        var m_new = max(m, score)
+        var corr = exp(m - m_new)
+        var p = exp(score - m_new)
+        l = l * corr + p
+        var vbase = (j * HKV + kvh) * HEAD_DIM
+        for d in range(HEAD_DIM):
+            acc[d] = acc[d] * corr + p * rebind[Scalar[DType.float32]](Vc[vbase + d])
+        m = m_new
+
+    var obase = (t * HQ + h) * HEAD_DIM
+    for d in range(HEAD_DIM):
+        O[obase + d] = rebind[O.ElementType](acc[d] / l)
+
+
 def attn_kernel[
     LT: TensorLayout
 ](
