@@ -68,9 +68,10 @@ forward pass on Metal is expected to be coherent where driving MAX's was not.
 
 ### Non-goals (v1)
 
-- The HTTP/API server, OpenAI/Anthropic compatibility, streaming SSE — these
-  already exist in max-backend (flare, pure Mojo) and are **ported in a later
-  phase**, not rebuilt here. v1 is a CLI/library that generates from a prompt.
+- Streaming SSE, Anthropic `/v1/messages`, multi-request concurrency. *(A
+  minimal non-streaming OpenAI `/v1/chat/completions` + `/v1/models` server did
+  land in Phase 6 — via libc sockets, since flare needs an incompatible Mojo;
+  §11 #11. The richer surface remains future work.)*
 - Multiple model architectures / config-driven generality.
 - A production **CPU** compute path. CPU is the conformance oracle only; the
   engine runs on the GPU.
@@ -269,7 +270,7 @@ positions), so it is verifiable in isolation with no other component built.
 | **3 — Forward pass** *(✅ done)* | embed → 24 layers → final norm → tied head on GPU/f32, real weights loaded from safetensors. **Greedy next-token argmax agrees with HF/CPU** (785, `'The'`); per-layer hidden drift ≤ 2.5e-3 over 24 layers (pure f32 accumulation). Per-layer comparison gives the layer-bisection (max-backend §8 #2 rung 6). See §11 #7. |
 | **4 — Decode loop + KV cache** *(✅ done)* | Prefill + incremental greedy decode on-device (per-layer KV cache, RoPE-by-cache-row so a step is O(positions)), EOS handling. **Token-for-token greedy parity with HF**: "What is the capital of France?" → `The capital of France is Paris.` + EOS, all 8 ids identical. See §11 #8. |
 | **5 — Sampling** *(✅ done)* | repetition-penalty → temperature → top-k → top-p → softmax per `generation_config.json`, then seeded multinomial draw (§5.6). Distribution verified vs HF's logits processors (max prob diff ≤ 6e-8). See §11 #9. |
-| **6 — Serve** | Port max-backend's flare HTTP layer (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) onto this engine — now a *pure-Mojo, GPU* request path end to end, **no Python/MAX at runtime**. |
+| **6 — Serve** *(✅ done, deviation)* | A **pure-Mojo, GPU** OpenAI-compatible HTTP server — but via **libc sockets (FFI), not flare**: flare pins Mojo 1.0.0b1 and the GPU engine needs the 1.0.0b2 nightly, and the stdlib has no sockets (§11 #11). `pixi run serve` answers `GET /v1/models` and `POST /v1/chat/completions` with real generated text. Minimal: single-threaded, non-streaming, crude request parse. **End to end, no Python/MAX at runtime.** |
 | **Later — bf16 GPU** | bf16-native device compute (§4) once it matches the f32 reference. |
 | **Later — Generalize** | Replace the hardcoded constants with a parsed `config.json` + a weight-name scheme; add a second architecture. The hardcoding in §2 is the seam this phase widens. |
 
@@ -480,8 +481,24 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
     weight load → greedy `generate` → `tokenizer.decode`. `pixi run chat --
     "What is the capital of France?"` → `The capital of France is Paris.`; a haiku
     prompt yields a coherent haiku. The first fully self-contained run of the
-    engine as an application. (Full Jinja templating via ../minja2 and the HTTP
-    server remain — §5.3, Phase 6b.)
+    engine as an application. (Full Jinja templating via ../minja2 remains — §5.3.)
+
+11. **OpenAI-compatible HTTP server works — via libc sockets, not flare (Phase
+    6b, ✅ with a deviation).** The plan was to port max-backend's flare HTTP
+    layer, but **flare pins Mojo `==1.0.0b1`** while this engine requires the
+    `1.0.0b2` nightly's `std.gpu`/`TileTensor` API — downgrading would break the
+    verified GPU kernels — and Mojo's stdlib has **no socket module**. So
+    `src/server.mojo` talks to libc directly (`socket`/`bind`/`listen`/`accept`/
+    `recv`/`send` via `external_call`): a single-threaded blocking accept loop
+    that loads the model once and answers `GET /v1/models` and
+    `POST /v1/chat/completions` with real ChatCompletion JSON. Verified live:
+    "What is the capital of France?" → `The capital of France is Paris.`; "Name
+    three primary colors." → `Three primary colors are red, blue, and yellow.`
+    Minimal (no SSE streaming, no concurrency, crude last-`"content"` request
+    parse). **The whole path — socket → tokenizer → GPU model → tokenizer → JSON
+    — is pure Mojo with no Python and no MAX at runtime: the stance max-backend
+    set out with and had to defer is met end to end.** `pixi run serve`.
+    Re-port to flare if/when it supports a Mojo that also runs the GPU engine.
 
 ## 12. Code layout
 

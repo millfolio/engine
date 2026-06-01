@@ -73,6 +73,10 @@ test-sample = "mojo run src/test_sample.mojo"
 # tables) + a checkpoint path ($QWEN_SAFETENSORS or forward-capture's meta).
 chat = { cmd = "mkdir -p build && mojo build src/main.mojo -o build/chat && ./build/chat" }
 
+# Phase 6b minimal OpenAI-compatible HTTP server, pure Mojo via libc sockets (no
+# flare — it needs Mojo 1.0.0b1; §11 #11). Listens on 127.0.0.1:8000.
+serve = { cmd = "mkdir -p build && mojo build src/server.mojo -o build/server && ./build/server" }
+
 [feature.oracle.tasks]
 # Generates tests/fixtures/attention/{synthetic,real_L0,real_L23}/ : q/k/v.bin,
 # expected.bin (NumPy ref), meta.txt. Also asserts NumPy ref ≈ HF context.
