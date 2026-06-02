@@ -139,7 +139,7 @@ def responses_to_chat(bv: Value) raises -> Optional[Value]:
         return None
     var msgs = String('{"messages":[')
     var instr = get_str(bv, "instructions")
-    if len(instr) > 0:
+    if instr.byte_length() > 0:
         msgs += '{"role":"system","content":"' + json_escape_str(to_bytes(instr)) + '"},'
     msgs += '{"role":"user","content":"' + json_escape_str(to_bytes(inp.value().s)) + '"}]}'
     return parse_json(msgs)
@@ -274,9 +274,11 @@ def resp_event(type: String, payload: String) -> SseEvent:
 
 
 def stream_deltas(mut s: ServerState, ids: List[Int]) raises -> List[String]:
-    """Decode `ids` incrementally into JSON-escaped deltas that each end on a
-    UTF-8 char boundary — so a multibyte char split across tokens isn't emitted
-    half-formed. (Buffered: all ids are already generated.)"""
+    """Decode `ids` incrementally into JSON-escaped deltas, each ending on a
+    UTF-8 char boundary.
+
+    A multibyte char split across tokens is never emitted half-formed.
+    (Buffered: all ids are already generated.)"""
     var out = List[String]()
     var prefix = List[Int]()
     var sent = 0
@@ -298,7 +300,6 @@ struct Api(Handler, Copyable, Movable):
     var st: UnsafePointer[ServerState, MutExternalOrigin]
 
     def serve(self, req: Request) raises -> Response:
-        ref s = self.st[]
         var path = req.url
         var is_post = req.method == Method.POST
 

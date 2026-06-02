@@ -77,9 +77,10 @@ chat = { cmd = "mkdir -p build && mojo build src/main.mojo -I ../minja2/src -o b
 # Listens on 127.0.0.1:8000. -I ../minja2/src: chat templating (§5.3). -I ../flare:
 # the kqueue reactor / Router / SSE, reused from max-backend (§11 #11 — the fork
 # now builds under 1.0.0b2). flare-tls builds libflare_tls.so (raw socket I/O +
-# TLS FFI) from the fork's own C++ source against the env's OpenSSL; flare dlopens
-# it from build/ at runtime.
-flare-tls = { cmd = "mkdir -p build && clang++ -O2 -std=c++17 -fPIC -DNDEBUG -shared -o build/libflare_tls.so ../flare/flare/tls/ffi/openssl_wrapper.cpp -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -lssl -lcrypto -Wl,-rpath,$CONDA_PREFIX/lib" }
+# TLS FFI) from the fork's own C++ source against the env's OpenSSL. flare's
+# find_flare_lib dlopens it from $CONDA_PREFIX/lib/ at runtime (its canonical
+# install location when CONDA_PREFIX is set, as it is under pixi), so build there.
+flare-tls = { cmd = "clang++ -O2 -std=c++17 -fPIC -DNDEBUG -shared -o $CONDA_PREFIX/lib/libflare_tls.so ../flare/flare/tls/ffi/openssl_wrapper.cpp -I$CONDA_PREFIX/include -L$CONDA_PREFIX/lib -lssl -lcrypto -Wl,-rpath,$CONDA_PREFIX/lib" }
 serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../minja2/src -I ../flare -o build/server && ./build/server", depends-on = ["flare-tls"] }
 
 # Launch opencode pointed at the running service. Start `pixi run serve` first
