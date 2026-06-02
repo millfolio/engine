@@ -35,6 +35,7 @@ from model import (
 )
 from tokenizer import Tokenizer, load_tokenizer
 from chat import load_chat_template, render_value, json_escape_str
+from toolcall import parse_tool_calls, ToolCall
 from template import Template
 from value import Value
 from json import parse_json, bytes_to_string
@@ -122,6 +123,17 @@ def get_str(req: Value, key: String) -> String:
         return o.value().s
     return String("")
 
+def esc(s: String) -> String:
+    """JSON-escape a String for embedding in a response body."""
+    return json_escape_str(to_bytes(s))
+
+def req_has_tools(req: Value) -> Bool:
+    """True iff the request carries a non-empty `tools` array — only then do we
+    lift the model's <tool_call> blocks into structured calls (a tools-less
+    request that happens to emit the literal text is left as plain content)."""
+    var t = req.map_get("tools")
+    return Bool(t) and not t.value().is_none() and t.value().truthy()
+
 
 def responses_to_chat(bv: Value) raises -> Optional[Value]:
     """Map a Responses-API body onto the chat-template's `messages` shape.
@@ -133,7 +145,7 @@ def responses_to_chat(bv: Value) raises -> Optional[Value]:
     by re-emitting JSON and reparsing so we reuse parse_json + render_value
     rather than constructing minja2 Values by hand."""
     if bv.map_get("messages"):
-        return bv  # already chat-shaped
+        return bv  # already chat-shaped (tools, if any, ride along)
     var inp = bv.map_get("input")
     if not (inp and inp.value().tag == VSTR):
         return None
@@ -142,7 +154,12 @@ def responses_to_chat(bv: Value) raises -> Optional[Value]:
     if instr.byte_length() > 0:
         msgs += '{"role":"system","content":"' + json_escape_str(to_bytes(instr)) + '"},'
     msgs += '{"role":"user","content":"' + json_escape_str(to_bytes(inp.value().s)) + '"}]}'
-    return parse_json(msgs)
+    var out = parse_json(msgs)
+    # Forward any tool definitions so render_value advertises them in the prompt.
+    var tools = bv.map_get("tools")
+    if tools and not tools.value().is_none():
+        out.map_set("tools", tools.value())
+    return out^
 
 
 def complete_utf8_len(b: List[UInt8]) -> Int:
@@ -244,6 +261,78 @@ def chunk_json(delta: String, finish: Bool, fin: String) -> String:
         + ',"finish_reason":' + finish_reason + "}]}"
     )
 
+# ── tool-calling envelopes (chat: `tool_calls`; responses: `function_call`) ──
+# Call/item ids are deterministic per response (`call_<i>` / `fc_<i>`): the model
+# never consumes them and clients only correlate within one turn, so we don't
+# need entropy (which the GPU-only build can't cheaply get anyway).
+
+
+def tool_calls_array_json(calls: List[ToolCall]) -> String:
+    """OpenAI chat `message.tool_calls` array. `arguments` is itself a JSON
+    *string*, so it's escaped a second time on the way in."""
+    var s = String("[")
+    for i in range(len(calls)):
+        if i > 0:
+            s += ","
+        s += (
+            '{"id":"call_' + String(i) + '","type":"function","function":{"name":"'
+            + esc(calls[i].name) + '","arguments":"' + esc(calls[i].arguments) + '"}}'
+        )
+    return s + "]"
+
+def completion_tools_json(content: String, calls: List[ToolCall],
+                          n_prompt: Int, n_gen: Int) -> String:
+    var content_field = String("null")
+    if content.byte_length() > 0:
+        content_field = '"' + esc(content) + '"'
+    return (
+        '{"id":"chatcmpl-millrace","object":"chat.completion","created":0,"model":"'
+        + MODEL_ID + '","choices":[{"index":0,"message":{"role":"assistant","content":'
+        + content_field + ',"tool_calls":' + tool_calls_array_json(calls)
+        + '},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":' + String(n_prompt)
+        + ',"completion_tokens":' + String(n_gen)
+        + ',"total_tokens":' + String(n_prompt + n_gen) + "}}"
+    )
+
+def chunk_role_json() -> String:
+    """Opening streaming chunk announcing the assistant role (content null)."""
+    return (
+        '{"id":"chatcmpl-millrace","object":"chat.completion.chunk","created":0,"model":"'
+        + MODEL_ID + '","choices":[{"index":0,"delta":{"role":"assistant","content":null}'
+        + ',"finish_reason":null}]}'
+    )
+
+def chunk_toolcall_json(i: Int, call: ToolCall) -> String:
+    """One streaming chunk carrying a whole tool call at `index` i (name +
+    full arguments). Clients accumulate per index; emitting it in one delta is
+    valid since generation is already buffered."""
+    var delta = (
+        '{"tool_calls":[{"index":' + String(i) + ',"id":"call_' + String(i)
+        + '","type":"function","function":{"name":"' + esc(call.name)
+        + '","arguments":"' + esc(call.arguments) + '"}}]}'
+    )
+    return (
+        '{"id":"chatcmpl-millrace","object":"chat.completion.chunk","created":0,"model":"'
+        + MODEL_ID + '","choices":[{"index":0,"delta":' + delta + ',"finish_reason":null}]}'
+    )
+
+def function_call_item_json(i: Int, name: String, args: String, status: String) -> String:
+    """A Responses-API `function_call` output item."""
+    return (
+        '{"type":"function_call","id":"fc_' + String(i) + '","call_id":"call_' + String(i)
+        + '","name":"' + esc(name) + '","arguments":"' + esc(args)
+        + '","status":"' + status + '"}'
+    )
+
+def function_calls_output_json(calls: List[ToolCall]) -> String:
+    var s = String("[")
+    for i in range(len(calls)):
+        if i > 0:
+            s += ","
+        s += function_call_item_json(i, calls[i].name, calls[i].arguments, "completed")
+    return s + "]"
+
+
 def output_message_json(content: String, status: String) -> String:
     return (
         '{"type":"message","id":"' + MSG_ID + '","status":"' + status
@@ -251,11 +340,10 @@ def output_message_json(content: String, status: String) -> String:
         + content + '","annotations":[]}]}'
     )
 
-def response_object_json(content: String, status: String, with_output: Bool,
-                         n_prompt: Int, n_gen: Int) -> String:
-    var output = String("[]")
-    if with_output:
-        output = "[" + output_message_json(content, "completed") + "]"
+def response_object_raw(output: String, status: String,
+                        n_prompt: Int, n_gen: Int) -> String:
+    """Responses-API `response` object with a pre-built `output` array (a list
+    of message and/or function_call items)."""
     return (
         '{"id":"' + RESP_ID + '","object":"response","created_at":0,"status":"'
         + status + '","model":"' + MODEL_ID + '","output":' + output
@@ -263,6 +351,13 @@ def response_object_json(content: String, status: String, with_output: Bool,
         + ',"output_tokens":' + String(n_gen)
         + ',"total_tokens":' + String(n_prompt + n_gen) + "}}"
     )
+
+def response_object_json(content: String, status: String, with_output: Bool,
+                         n_prompt: Int, n_gen: Int) -> String:
+    var output = String("[]")
+    if with_output:
+        output = "[" + output_message_json(content, "completed") + "]"
+    return response_object_raw(output, status, n_prompt, n_gen)
 
 def resp_event(type: String, payload: String) -> SseEvent:
     # Named SSE frame: an `event:` line plus a matching `"type"` in the JSON
@@ -328,6 +423,25 @@ struct Api(Handler, Copyable, Movable):
         var fin = String("stop") if r.stopped else String("length")
         print("  chat: ", len(r.ids), " tokens [", fin, "]", sep="")
 
+        # Tool calls: only when the request advertised tools. Lift the model's
+        # <tool_call> blocks into OpenAI `tool_calls` rather than leaking the XML.
+        if req_has_tools(bv):
+            var tc = parse_tool_calls(bytes_to_string(s.tok.decode(r.ids)))
+            if tc.has_calls():
+                print("    -> ", len(tc.calls), " tool call(s)", sep="")
+                if want_stream:
+                    var ch = SseChannel()
+                    ch.push(SseEvent.message(chunk_role_json()))
+                    if tc.content.byte_length() > 0:
+                        ch.push(SseEvent.message(chunk_json(esc(tc.content), False, fin)))
+                    for i in range(len(tc.calls)):
+                        ch.push(SseEvent.message(chunk_toolcall_json(i, tc.calls[i])))
+                    ch.push(SseEvent.message(chunk_json("", True, "tool_calls")))
+                    ch.push(SseEvent.message("[DONE]"))
+                    ch.close()
+                    return sse_response(ch)
+                return ok_json(completion_tools_json(tc.content, tc.calls, len(ids), len(r.ids)))
+
         if want_stream:
             var ch = SseChannel()
             var deltas = stream_deltas(s, r.ids)
@@ -362,6 +476,37 @@ struct Api(Handler, Copyable, Movable):
         var r = gen_full(s, ids, max_new, temp, top_k, top_p)
         var full = json_escape_str(s.tok.decode(r.ids))
         print("  responses: ", len(r.ids), " tokens", sep="")
+
+        # Tool calls -> Responses `function_call` output items (only if requested).
+        if req_has_tools(bv0):
+            var tc = parse_tool_calls(bytes_to_string(s.tok.decode(r.ids)))
+            if tc.has_calls():
+                print("    -> ", len(tc.calls), " tool call(s)", sep="")
+                var out_arr = function_calls_output_json(tc.calls)
+                if not want_stream:
+                    return ok_json(response_object_raw(out_arr, "completed", len(ids), len(r.ids)))
+                var tch = SseChannel()
+                tch.push(resp_event("response.created",
+                    '"response":' + response_object_raw("[]", "in_progress", len(ids), 0)))
+                for i in range(len(tc.calls)):
+                    var nm = tc.calls[i].name
+                    var ar = tc.calls[i].arguments
+                    tch.push(resp_event("response.output_item.added",
+                        '"output_index":' + String(i) + ',"item":'
+                        + function_call_item_json(i, nm, "", "in_progress")))
+                    tch.push(resp_event("response.function_call_arguments.delta",
+                        '"item_id":"fc_' + String(i) + '","output_index":' + String(i)
+                        + ',"delta":"' + esc(ar) + '"'))
+                    tch.push(resp_event("response.function_call_arguments.done",
+                        '"item_id":"fc_' + String(i) + '","output_index":' + String(i)
+                        + ',"arguments":"' + esc(ar) + '"'))
+                    tch.push(resp_event("response.output_item.done",
+                        '"output_index":' + String(i) + ',"item":'
+                        + function_call_item_json(i, nm, ar, "completed")))
+                tch.push(resp_event("response.completed",
+                    '"response":' + response_object_raw(out_arr, "completed", len(ids), len(r.ids))))
+                tch.close()
+                return sse_response(tch)
 
         if not want_stream:
             return ok_json(response_object_json(full, "completed", True, len(ids), len(r.ids)))

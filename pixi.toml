@@ -68,6 +68,11 @@ test-generate = { cmd = "mkdir -p build && mojo build src/test_generate.mojo -o 
 # distribution vs HF's logits processors. Needs sample-capture.
 test-sample = "mojo run src/test_sample.mojo"
 
+# Phase 6b tool-calling: parse the model's <tool_call> blocks into structured
+# calls (src/toolcall.mojo). Pure CPU + JSON, no GPU/fixtures. -I ../minja2/src
+# for the JSON parser/serializer.
+test-toolcall = "mojo run -I ../minja2/src src/test_toolcall.mojo"
+
 # Phase 6a end-to-end chat CLI (ARCHITECTURE.md §6): prompt -> text, pure Mojo on
 # the GPU. Usage: pixi run chat -- "Your question". Needs tok-capture (tokenizer
 # tables) + a checkpoint path ($QWEN_SAFETENSORS or forward-capture's meta).
