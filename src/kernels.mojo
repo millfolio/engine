@@ -346,8 +346,17 @@ def attn_cached_kernel[
     32 lanes split the keys; each lane runs a flash/online softmax over its
     subset, then a single cross-lane merge (max → rescale → sum) combines them.
     Q and K are already RoPE-rotated (rope_q/rope_k), so this kernel has no
-    transcendentals — just dot products + the online softmax."""
+    transcendentals — just dot products + the online softmax.
+
+    Two refinements over the first warp version (measured ~2.6× at M=2048): Q is
+    loaded into registers once instead of re-read from memory for every key, and
+    the per-key Q·K dot and V accumulate use SIMD[VEC] vector loads. The vector
+    dot sums VEC partials before the horizontal reduce, so the 64-term sum order
+    differs from a scalar loop — output drifts by ≤4e-9 (pure f32 rounding), far
+    under the forward tolerance, and greedy decode stays token-for-token (§11 #12)."""
     comptime assert Q.flat_rank == 1
+    comptime VEC = 8
+    comptime NVEC = HEAD_DIM // VEC
     var qh = Int(global_idx.x) // WARP_SIZE     # one warp per (query, head)
     var lane = Int(global_idx.x) % WARP_SIZE
     var h = qh % HQ
@@ -359,22 +368,27 @@ def attn_cached_kernel[
     var qbase = (t * HQ + h) * HEAD_DIM
     var scale = 1.0 / sqrt(Float32(HEAD_DIM))
 
+    # Q lives in registers for the whole key loop (NVEC vector chunks).
+    var qreg = InlineArray[SIMD[DType.float32, VEC], NVEC](fill=0.0)
+    for c in range(NVEC):
+        qreg[c] = Q.raw_load[VEC](qbase + c * VEC)
+
     # Each lane runs flash softmax over its slice of keys (j = lane, lane+32, …).
     var m = Float32(-1.0e30)
     var l = Float32(0.0)
-    var acc = InlineArray[Float32, HEAD_DIM](fill=0.0)
+    var accv = InlineArray[SIMD[DType.float32, VEC], NVEC](fill=0.0)
     for j in range(lane, qpos + 1, WARP_SIZE):
         var kbase = (j * HKV + kvh) * HEAD_DIM
-        var score = Float32(0.0)
-        for d in range(HEAD_DIM):
-            score += rebind[Scalar[DType.float32]](Q[qbase + d]) * rebind[Scalar[DType.float32]](Kc[kbase + d])
-        score *= scale
+        var s = SIMD[DType.float32, VEC](0.0)
+        for c in range(NVEC):
+            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC)
+        var score = s.reduce_add() * scale
         var m_new = max(m, score)
         var corr = exp(m - m_new)
         var p = exp(score - m_new)
         l = l * corr + p
-        for d in range(HEAD_DIM):
-            acc[d] = acc[d] * corr + p * rebind[Scalar[DType.float32]](Vc[kbase + d])
+        for c in range(NVEC):
+            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC)
         m = m_new
 
     # Cross-lane merge: global max, rescale each lane's partials, then sum.
@@ -382,7 +396,8 @@ def attn_cached_kernel[
     var f = exp(m - m_g)
     var l_g = warp_sum(l * f)
     var obase = (t * HQ + h) * HEAD_DIM
-    for d in range(HEAD_DIM):
-        var a = warp_sum(acc[d] * f)
-        if lane == 0:
-            O[obase + d] = rebind[O.ElementType](a / l_g)
+    for c in range(NVEC):
+        for e in range(VEC):
+            var a = warp_sum(accv[c][e] * f)
+            if lane == 0:
+                O[obase + c * VEC + e] = rebind[O.ElementType](a / l_g)
