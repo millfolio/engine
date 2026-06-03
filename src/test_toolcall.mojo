@@ -53,6 +53,28 @@ def main() raises:
     expect(not r5.has_calls(), "5: malformed should yield no call", all_ok)
     expect(r5.content.find("not json") >= 0, "5: malformed kept in content=[" + r5.content + "]", all_ok)
 
+    # 6. repairable: the octopus case — array closed with } instead of ] (missing ])
+    var r6 = parse_tool_calls(
+        String('<tool_call>\n{"name": "question", "arguments": {"questions": ["How many fingers does an octopus have?"}}\n</tool_call>')
+    )
+    expect(r6.has_calls(), "6: repair should recover a call", all_ok)
+    expect(len(r6.calls) == 1 and r6.calls[0].name == "question", "6: name", all_ok)
+    expect(r6.calls[0].arguments.find("octopus") >= 0, "6: args kept=" + r6.calls[0].arguments, all_ok)
+
+    # 7. truncated: no closing </tool_call>, brackets left open -> repaired
+    var r7 = parse_tool_calls(String('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Cluj"'))
+    expect(r7.has_calls() and r7.calls[0].name == "get_weather", "7: truncated recovered", all_ok)
+    expect(r7.calls[0].arguments.find("Cluj") >= 0, "7: args=" + r7.calls[0].arguments, all_ok)
+
+    # 8. trailing comma -> repaired
+    var r8 = parse_tool_calls(String('<tool_call>\n{"name": "f", "arguments": {"a": 1,}}\n</tool_call>'))
+    expect(r8.has_calls() and r8.calls[0].name == "f", "8: trailing comma recovered", all_ok)
+
+    # 9. beyond repair (no name) -> verbatim, no call
+    var r9 = parse_tool_calls(String("<tool_call>\n{{{ junk\n</tool_call>"))
+    expect(not r9.has_calls(), "9: garbage should yield no call", all_ok)
+    expect(r9.content.find("junk") >= 0, "9: garbage kept in content", all_ok)
+
     if all_ok:
         print("toolcall gate: PASS")
     else:
