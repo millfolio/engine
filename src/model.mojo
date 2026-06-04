@@ -19,7 +19,7 @@ from layout import TileTensor, row_major
 
 from kernels import (
     cvt_kernel, embed_kernel, add_kernel, rmsnorm_kernel, matmul_kernel,
-    matmul_tiled_kernel, slice_row_kernel,
+    matmul_tiled_kernel, matmul_simd_kernel, SG_BM, SG_BN, SG_TPB, slice_row_kernel,
     silu_mul_kernel, attn_cached_kernel, flash_attn_kernel, FLASH_PW,
     copy_kernel, rope_k_kernel, rope_q_kernel,
 )
@@ -390,6 +390,9 @@ struct Weights(Movable):
     var hkv: Int          # kv heads
     var head_dim: Int
     var vocab: Int
+    # Set once at startup by probe_simd_gemm: use the simdgroup-matrix GEMM for
+    # prefill if this toolchain accepts the AIR intrinsics, else the scalar path.
+    var simd_ok: Bool
 
 
 def _hidden_size(entries: List[TensorEntry], name2idx: Dict[String, Int]) raises -> Int:
@@ -459,17 +462,19 @@ def load_weights(ctx: DeviceContext, path: String) raises -> Weights:
         up.append(load_named_bf16(ctx, paths, entries, name2idx, p + "mlp.up_proj.weight"))
         down.append(load_named_bf16(ctx, paths, entries, name2idx, p + "mlp.down_proj.weight"))
     return Weights(embed^, final_norm^, ln1^, qw^, qb^, kw^, kb^, vw^, vb^, ow^, ln2^, gate^, up^, down^,
-                   arch, nlayers, hidden, inter, nkv, hq, hkv, head_dim, VOCAB)
+                   arch, nlayers, hidden, inter, nkv, hq, hkv, head_dim, VOCAB, False)
 
 
 # ── op launchers (each runs one kernel, returns a new device buffer) ───────────
 
 def mm(ctx: DeviceContext, mut x: DevBuf, mut w: WBuf, mut b: DevBuf,
-       M: Int, K: Int, N: Int, use_bias: Int) raises -> DevBuf:
+       M: Int, K: Int, N: Int, use_bias: Int, simd_ok: Bool = False) raises -> DevBuf:
     var y = ctx.enqueue_create_buffer[DType.float32](M * N)
     var lay = row_major(M * N)
     if M == 1:
-        # decode: memory-bound GEMV, one warp per output element (M*N warps).
+        # decode: memory-bound GEMV, one warp per output element (M*N warps). The
+        # simdgroup-matrix path is for prefill only — at M=1 its 8-row tiles waste
+        # 7/8 of every fragment, so decode always uses the GEMV.
         comptime k = matmul_kernel[type_of(lay)]
         ctx.enqueue_function[k](
             TileTensor(x, row_major(M * K)), TileTensor(w, row_major(N * K)),
@@ -477,10 +482,21 @@ def mm(ctx: DeviceContext, mut x: DevBuf, mut w: WBuf, mut b: DevBuf,
             M, K, N, use_bias,
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK), block_dim=BLOCK,
         )
+    elif simd_ok:
+        # prefill, fast path: simdgroup-matrix GEMM (~4.5× the scalar tiled kernel
+        # on the M4). Gated by the startup probe; the scalar path below is the
+        # fallback if this toolchain rejects the AIR intrinsics.
+        comptime ks = matmul_simd_kernel[type_of(lay)]
+        ctx.enqueue_function[ks](
+            TileTensor(x, row_major(M * K)), TileTensor(w, row_major(N * K)),
+            TileTensor(b, row_major(N if use_bias != 0 else 1)), TileTensor(y, lay),
+            M, K, N, use_bias,
+            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)), block_dim=SG_TPB,
+        )
     else:
-        # prefill: 2D register-tiled GEMM, one warp per (CN-column, TM-token) block,
-        # so each weight is reused across TM tokens and each X value across CN
-        # columns — cutting the dominant X traffic CN-fold (§11 #12). TM=CN=8
+        # prefill, scalar fallback: 2D register-tiled GEMM, one warp per (CN-column,
+        # TM-token) block, so each weight is reused across TM tokens and each X value
+        # across CN columns — cutting the dominant X traffic CN-fold (§11 #12). TM=CN=8
         # measured ~2× a token-only tiling (~210 GFLOP/s) on the M4.
         comptime TM = 8
         comptime CN = 8
@@ -492,6 +508,63 @@ def mm(ctx: DeviceContext, mut x: DevBuf, mut w: WBuf, mut b: DevBuf,
             grid_dim=ceildiv(ceildiv(N, CN) * ceildiv(M, TM) * WARP_SIZE, BLOCK), block_dim=BLOCK,
         )
     return y^
+
+def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
+    """Runtime capability gate for the simdgroup-matrix GEMM. Runs a tiny
+    matmul_simd_kernel and checks it against a CPU reference. Returns False — so
+    mm() uses the scalar fallback — if this Metal toolchain rejects the AIR
+    intrinsics: that surfaces as a catchable pipeline-state error (not a crash),
+    and the DeviceContext stays usable afterward."""
+    try:
+        var M = 8
+        var K = 16
+        var N = 8
+        var xb = ctx.enqueue_create_buffer[DType.float32](M * K)
+        var wb = ctx.enqueue_create_buffer[DType.uint16](N * K)
+        var bb = ctx.enqueue_create_buffer[DType.float32](1)
+        var yb = ctx.enqueue_create_buffer[DType.float32](M * N)
+        var hx = List[Float32]()
+        for i in range(M * K):
+            hx.append(Float32((i * 3) % 7) * 0.25 - 0.75)
+        with xb.map_to_host() as h:
+            for i in range(M * K):
+                h[i] = hx[i]
+        var hw = List[Float32]()        # bf16-truncated weight values (host ref)
+        with wb.map_to_host() as h:
+            for i in range(N * K):
+                var f = Float32((i * 2) % 5) * 0.5 - 1.0
+                var bits = UnsafePointer(to=f).bitcast[UInt32]()[0]
+                var top = UInt16(bits >> 16)
+                h[i] = top
+                var re: UInt32 = UInt32(top) << 16
+                hw.append(UnsafePointer(to=re).bitcast[Float32]()[0])
+        var lay = row_major(M * N)
+        var xt = TileTensor(xb, row_major(M * K))
+        var wt = TileTensor(wb, row_major(N * K))
+        var bt = TileTensor(bb, row_major(1))
+        var yt = TileTensor(yb, lay)
+        comptime ks = matmul_simd_kernel[type_of(lay)]
+        ctx.enqueue_function[ks](
+            xt, wt, bt, yt, M, K, N, 0,
+            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)), block_dim=SG_TPB,
+        )
+        ctx.synchronize()
+        var ok = True
+        with yb.map_to_host() as h:
+            for m in range(M):
+                for n in range(N):
+                    var acc = Float32(0.0)
+                    for k in range(K):
+                        acc += hx[m * K + k] * hw[n * K + k]
+                    var e = h[m * N + n] - acc
+                    if e < 0:
+                        e = -e
+                    if e > 1.0e-3:
+                        ok = False
+        return ok
+    except:
+        return False
+
 
 def rmsnorm(ctx: DeviceContext, mut x: DevBuf, mut w: DevBuf, T: Int, dim: Int) raises -> DevBuf:
     var y = ctx.enqueue_create_buffer[DType.float32](T * dim)
@@ -630,20 +703,20 @@ def layer_cached(ctx: DeviceContext, mut w: Weights, l: Int, mut h: DevBuf,
     var hd = w.hidden
     var nkv = w.nkv
     var ln1 = rmsnorm(ctx, h, w.ln1[l], Tq, hd)
-    var q = mm(ctx, ln1, w.qw[l], w.qb[l], Tq, hd, hd, 1)
-    var kk = mm(ctx, ln1, w.kw[l], w.kb[l], Tq, hd, nkv, 1)
-    var vv = mm(ctx, ln1, w.vw[l], w.vb[l], Tq, hd, nkv, 1)
+    var q = mm(ctx, ln1, w.qw[l], w.qb[l], Tq, hd, hd, 1, w.simd_ok)
+    var kk = mm(ctx, ln1, w.kw[l], w.kb[l], Tq, hd, nkv, 1, w.simd_ok)
+    var vv = mm(ctx, ln1, w.vw[l], w.vb[l], Tq, hd, nkv, 1, w.simd_ok)
     rope_k(ctx, kk, kc, Tq, q_offset, cache_len, w.hkv, w.head_dim, w.arch)   # store K RoPE-rotated
     copy_into(ctx, vv, vc, q_offset * nkv, Tq * nkv, cache_len)               # V is not rotated
     var o = attn_cached(ctx, q, kc, vc, Tq, q_offset, cache_len,
                         w.hidden, w.hq, w.hkv, w.head_dim, w.arch)
-    var o2 = mm(ctx, o, w.ow[l], dummy, Tq, hd, hd, 0)
+    var o2 = mm(ctx, o, w.ow[l], dummy, Tq, hd, hd, 0, w.simd_ok)
     var h2 = add(ctx, h, o2, Tq * hd)
     var ln2 = rmsnorm(ctx, h2, w.ln2[l], Tq, hd)
-    var g = mm(ctx, ln2, w.gate[l], dummy, Tq, hd, w.inter, 0)
-    var u = mm(ctx, ln2, w.up[l], dummy, Tq, hd, w.inter, 0)
+    var g = mm(ctx, ln2, w.gate[l], dummy, Tq, hd, w.inter, 0, w.simd_ok)
+    var u = mm(ctx, ln2, w.up[l], dummy, Tq, hd, w.inter, 0, w.simd_ok)
     var gu = silu_mul(ctx, g, u, Tq * w.inter)
-    var dn = mm(ctx, gu, w.down[l], dummy, Tq, w.inter, hd, 0)
+    var dn = mm(ctx, gu, w.down[l], dummy, Tq, w.inter, hd, 0, w.simd_ok)
     return add(ctx, h2, dn, Tq * hd)
 
 def argmax_last(ctx: DeviceContext, mut w: Weights, mut h: DevBuf, T: Int, mut dummy: DevBuf) raises -> Int:

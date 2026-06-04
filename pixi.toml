@@ -50,6 +50,11 @@ test-attention = "mojo run src/test_attention.mojo"
 # Phase 2 (§3, §11 #4): matmul+bias, RMSNorm, SwiGLU vs NumPy.
 test-kernels = "mojo run src/test_kernels.mojo"
 
+# simdgroup-matrix prefill GEMM (matmul_simd_kernel) vs the scalar tiled GEMM,
+# across sizes incl. boundaries, plus the runtime capability probe. Needs the
+# Metal GPU; no fixtures.
+test-simd-gemm = "mojo run src/test_simd_gemm.mojo"
+
 # Phase 2 (§5.1, §11 #5): safetensors parse + bf16→f32 vs torch. Needs loader-capture.
 test-loader = "mojo run src/test_loader.mojo"
 
@@ -76,6 +81,11 @@ test-toolcall = "mojo run -I ../minja2/src src/test_toolcall.mojo"
 # Disk block KV-cache roundtrip (src/blockcache.mojo): store -> corrupt -> restore
 # bit-identical, chained-hash determinism, collision guard. Needs the GPU.
 test-blockcache = "mojo run src/test_blockcache.mojo"
+
+# Manual GPU gate: greedy-parity of the simdgroup-matrix prefill GEMM — generate
+# the same prompt with the scalar vs simd GEMM and assert identical tokens. Needs
+# weights + Metal GPU. Usage: pixi run simd-parity [-- "prompt"].
+simd-parity = { cmd = "mojo build tests/manual/simd_parity.mojo -I src -I ../minja2/src -o build/simd_parity && ./build/simd_parity" }
 
 # Phase 6a end-to-end chat CLI (ARCHITECTURE.md §6): prompt -> text, pure Mojo on
 # the GPU. Usage: pixi run chat -- "Your question". Needs tok-capture (tokenizer

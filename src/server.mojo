@@ -33,7 +33,7 @@ from flare.prelude import *
 from flare.http import Handler, SseChannel, SseEvent, sse_response
 
 from model import (
-    Weights, load_weights, EOS1, EOS2,
+    Weights, load_weights, probe_simd_gemm, EOS1, EOS2,
     Session, new_session, sess_prefill_suffix, sess_step,
     argmax_f, process_logits, sample,
 )
@@ -688,12 +688,19 @@ def main() raises:
     var tmpl = load_chat_template(TEMPLATE)
     var ctx = DeviceContext()
     var w = load_weights(ctx, ckpt)
+    # Probe the simdgroup-matrix GEMM once; on success prefill GEMMs take the
+    # ~4.5× faster path, else fall back to the scalar tiled kernel (see mm()).
+    w.simd_ok = probe_simd_gemm(ctx)
     if model_id.byte_length() == 0:   # default id from detected arch
         model_id = String(MODEL_3B) if w.arch == 1 else String(MODEL_05B)
     # One persistent KV cache for the process, sized to the detected arch.
     var sess = new_session(ctx, MAX_SEQ, w.nlayers, w.nkv)
     print("  serving ", model_id, "  (hidden=", w.hidden, ", layers=", w.nlayers,
           ", heads=", w.hq, "/", w.hkv, ", head_dim=", w.head_dim, ")", sep="")
+    var gemm_path = String("simdgroup-matrix (~4.5x)")
+    if not w.simd_ok:
+        gemm_path = String("scalar tiled (simd probe failed)")
+    print("  prefill GEMM: ", gemm_path, sep="")
 
     # Disk-backed prefix cache (per model), survives restarts.
     var kvdir = String(getenv("HOME")) + "/.cache/millrace/kv/" + _slug(model_id)

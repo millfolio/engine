@@ -15,6 +15,7 @@ from std.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum, max as warp_max
 from std.memory import stack_allocation
 from std.collections import InlineArray
+from std.sys.info import external_call   # emit AIR simdgroup-matrix ops (see matmul_simd_kernel)
 from layout import TileTensor, TensorLayout
 
 # Head/hidden dims are NOT fixed here: the head-sensitive kernels (rope_q/k,
@@ -216,6 +217,121 @@ def matmul_tiled_kernel[
                 if use_bias != 0:
                     bias = rebind[Scalar[DType.float32]](B[n])
                 Y[m * N + n] = rebind[Y.ElementType](total + bias)
+
+
+# ── simdgroup-matrix GEMM (prefill, opt-in via runtime capability gate) ────────
+# Apple's AIR simdgroup_matrix_8x8 ops run X·Wᵀ on the GPU's matrix units. They
+# are *external AIR functions* (not LLVM intrinsics), so `external_call` names
+# them — `llvm_intrinsic` can't (it only sees upstream LLVM intrinsics) and Metal
+# has no inline-asm dialect. The exact mangled symbols + signatures below were
+# verified by disassembling a compiled .metal (metal-objdump): the fragment is
+# <64 x float> (the whole 8x8 matrix), and load/store take three <2xi64> vectors
+# (dims, row-stride, origin). A runtime probe (model.probe_simd_gemm) checks the
+# toolchain accepts them and falls back to matmul_tiled_kernel otherwise — the
+# symbol names are not an API contract and a Metal toolchain bump could break
+# them (a mismatch is a catchable pipeline-state error, not a crash).
+#
+# Each threadgroup computes a 32×32 output tile with 4 simdgroups; per k-step it
+# stages an X block (32×8) and a transposed+widened W block (8×32, so the fragment
+# orientation yields X·Wᵀ) into threadgroup memory, then each simdgroup loads one
+# 8×8 A-fragment and reuses it across 4 B-column fragments — 16 MACs/threadgroup,
+# f32 accumulate. The 32×32 tiling cuts redundant device traffic ~4× vs a naive
+# 8×8-per-simdgroup kernel (which is memory-bandwidth-bound), giving ~4.5× the
+# scalar matmul_tiled_kernel (~1.1 TFLOP/s vs ~250 GFLOP/s on the M4). Output is
+# f32 like the scalar path but NOT bit-identical (hardware FMA/order differ;
+# measured |Δ| ≲ 2.4e-6), so greedy-parity is re-checked after integration.
+comptime _SG_FRAG = SIMD[DType.float32, 64]   # an 8×8 fragment = the whole matrix
+comptime _SG_V2 = SIMD[DType.int64, 2]
+comptime _SG_LD = "air.simdgroup_matrix_8x8_load.v64f32.p3f32"
+comptime _SG_MAC = "air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32"
+comptime _SG_ST = "air.simdgroup_matrix_8x8_store.v64f32.p3f32"
+comptime SG_BM = 32              # threadgroup output rows
+comptime SG_BN = 32              # threadgroup output cols
+comptime SG_NCT = 4              # column-tiles per simdgroup (SG_BN // 8)
+comptime SG_TPB = 128            # threads/block = (SG_BM // 8) simdgroups × 32
+
+
+def matmul_simd_kernel[
+    LT: TensorLayout
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    W: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 weights (raw u16 bits)
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    M: Int,
+    K: Int,
+    N: Int,
+    use_bias: Int,
+):
+    """Y[M,N] = X[M,K] · W[N,K]ᵀ (+bias) on the simdgroup-matrix units. Same
+    signature/semantics as matmul_tiled_kernel; launch with grid_dim=
+    (ceildiv(N,SG_BN), ceildiv(M,SG_BM)), block_dim=SG_TPB."""
+    comptime assert X.flat_rank == 1
+    var tid = thread_idx.x
+    var sg = Int(tid) // 32                    # simdgroup id 0..3
+    var m0 = Int(block_idx.y) * SG_BM
+    var n0 = Int(block_idx.x) * SG_BN
+
+    var sA = stack_allocation[SG_BM * 8, Float32, address_space = AddressSpace.SHARED]()
+    var sB = stack_allocation[8 * SG_BN, Float32, address_space = AddressSpace.SHARED]()
+    var sC = stack_allocation[SG_BM * SG_BN, Float32, address_space = AddressSpace.SHARED]()
+
+    var dims = _SG_V2(8, 8)
+    var lay8 = _SG_V2(1, 8)                    # row stride 8  (sA is SG_BM×8)
+    var layN = _SG_V2(1, SG_BN)                # row stride 32 (sB, sC are *×SG_BN)
+    var origin = _SG_V2(0, 0)
+
+    var acc = InlineArray[_SG_FRAG, SG_NCT](fill=_SG_FRAG(0.0))
+
+    var kt = 0
+    while kt < K:
+        # stage X block (SG_BM×8) → sA[r*8+c]
+        for j in range(SG_BM * 8 // SG_TPB):
+            var c = Int(tid) + SG_TPB * j
+            var r = c // 8
+            var col = c % 8
+            var mm = m0 + r
+            var kk = kt + col
+            var xv = Float32(0.0)
+            if mm < M and kk < K:
+                xv = rebind[Scalar[DType.float32]](X[mm * K + kk])
+            sA[c] = xv
+        # stage W block transposed+widened → sB[k*SG_BN+n] = bf16(W[n0+n, kt+k])
+        for j in range(8 * SG_BN // SG_TPB):
+            var c = Int(tid) + SG_TPB * j
+            var kr = c // SG_BN
+            var nl = c % SG_BN
+            var nn = n0 + nl
+            var kk = kt + kr
+            var wv = Float32(0.0)
+            if nn < N and kk < K:
+                wv = bf16_widen(rebind[Scalar[DType.uint16]](W[nn * K + kk]))
+            sB[c] = wv
+        barrier()
+
+        var fa = external_call[_SG_LD, _SG_FRAG](sA + sg * 8 * 8, dims, lay8, origin)
+        for ct in range(SG_NCT):
+            var fb = external_call[_SG_LD, _SG_FRAG](sB + ct * 8, dims, layN, origin)
+            acc[ct] = external_call[_SG_MAC, _SG_FRAG](fa, fb, acc[ct])
+        barrier()
+        kt += 8
+
+    for ct in range(SG_NCT):
+        external_call[_SG_ST, NoneType](acc[ct], sC + sg * 8 * SG_BN + ct * 8, dims, layN, origin)
+    barrier()
+
+    # copy sC (SG_BM×SG_BN) → Y with bias + boundary mask
+    for j in range(SG_BM * SG_BN // SG_TPB):
+        var c = Int(tid) + SG_TPB * j
+        var r = c // SG_BN
+        var nl = c % SG_BN
+        var mm = m0 + r
+        var nn = n0 + nl
+        if mm < M and nn < N:
+            var v = sC[c]
+            if use_bias != 0:
+                v += rebind[Scalar[DType.float32]](B[nn])
+            Y[mm * N + nn] = rebind[Y.ElementType](v)
 
 
 def silu_mul_kernel[
