@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    paths: ["scripts/package_engine.sh", ".github/workflows/engine-zip.yml"]
   workflow_dispatch:
 
 permissions:
