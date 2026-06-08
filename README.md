@@ -86,6 +86,23 @@ curl -s localhost:8000/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"In one sentence, what is the capital of France?"}]}'
 ```
 
+## Configuration
+
+Optional config at `~/.config/millrace/config.json` (override the path with
+`MILLRACE_CONFIG`), parsed with the same minja2 json the server uses for requests.
+All keys are optional — see [`config.example.json`](config.example.json):
+
+| key | default | notes / env override |
+|---|---|---|
+| `port` | `8000` | `MILLRACE_PORT` |
+| `model` | (meta.txt fixture) | HF id or checkpoint path; below CLI arg + `$QWEN_SAFETENSORS` |
+| `q4` | `false` | group-128 int4 projection weights; `QWEN_Q4=1` |
+| `kv_budget_mb` | `8192` (8 GiB) | disk KV-cache LRU cap, in MiB |
+
+**Precedence: env / CLI arg > config file > built-in default.** So
+`pixi run serve <model>` and the existing env vars still take priority; the file
+is a default layer underneath.
+
 ## Models (0.5B / 3B)
 
 The engine auto-detects the architecture from the checkpoint — **Qwen2.5-0.5B**

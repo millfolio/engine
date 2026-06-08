@@ -691,9 +691,70 @@ def hf_cache_path(model_id: String) raises -> String:
     return repo + "/snapshots/" + String(commit)
 
 
+struct Config(Copyable, Movable):
+    """Server config from ~/.config/millrace/config.json (+ env). All keys optional;
+    precedence is: env var > config file > built-in default."""
+    var port: Int
+    var model: String       # default model/checkpoint (when no CLI arg / $QWEN_SAFETENSORS)
+    var q4: Bool            # group-128 int4 projection weights
+    var kv_budget_mb: Int   # disk KV-cache LRU cap, in MiB
+
+    def __init__(out self, port: Int, var model: String, q4: Bool, kv_budget_mb: Int):
+        self.port = port
+        self.model = model^
+        self.q4 = q4
+        self.kv_budget_mb = kv_budget_mb
+
+
+def _config_atoi(s: String, default: Int) -> Int:
+    var n = 0
+    var any = False
+    for cp in s.codepoints():
+        var v = Int(cp)
+        if v < 48 or v > 57:
+            return default
+        n = n * 10 + (v - 48)
+        any = True
+    return n if any else default
+
+
+def load_config() -> Config:
+    """Load ~/.config/millrace/config.json (override path: $MILLRACE_CONFIG).
+    Recognized keys: port (int), model (str), q4 (bool), kv_budget_mb (int, MiB).
+    Parsed with the same minja2 json the server already uses for requests."""
+    var port = Int(PORT)
+    var model = String("")
+    var q4 = False
+    var kv_mb = Int(KV_BUDGET_BYTES) // (1024 * 1024)   # default 8 GiB -> 8192 MiB
+
+    var path = String(getenv("MILLRACE_CONFIG"))
+    if path.byte_length() == 0:
+        path = String(getenv("HOME")) + "/.config/millrace/config.json"
+    try:
+        var v = parse_json(read_text(path))
+        port = get_int(v, "port", port)
+        var m = get_str(v, "model")
+        if m.byte_length() > 0:
+            model = m^
+        q4 = get_bool(v, "q4", q4)
+        kv_mb = get_int(v, "kv_budget_mb", kv_mb)
+    except:
+        pass  # missing / unreadable / malformed config -> defaults
+
+    # env overrides (where one exists)
+    var ep = String(getenv("MILLRACE_PORT"))
+    if ep.byte_length() > 0:
+        port = _config_atoi(ep, port)
+    if String(getenv("QWEN_Q4")) == "1":
+        q4 = True
+    return Config(port, model^, q4, kv_mb)
+
+
 def main() raises:
-    # Checkpoint selection: `serve <hf-id-or-path>` (CLI) > $QWEN_SAFETENSORS > meta.txt.
-    # An HF id resolves to its cached snapshot dir (weights assumed downloaded); the
+    # Config: ~/.config/millrace/config.json (+ env). Path override: $MILLRACE_CONFIG.
+    var cfg = load_config()
+    # Checkpoint selection: `serve <hf-id-or-path>` (CLI) > $QWEN_SAFETENSORS >
+    # config `model` > meta.txt. An HF id resolves to its cached snapshot dir; the
     # served model id (reported by /v1/models) is that id, else derived from the arch.
     var ckpt: String
     var model_id = String("")
@@ -710,13 +771,21 @@ def main() raises:
         var env = String(getenv("QWEN_SAFETENSORS"))
         if env.byte_length() > 0:
             ckpt = env
+        elif cfg.model.byte_length() > 0:
+            try:
+                ckpt = hf_cache_path(cfg.model)
+                model_id = cfg.model.copy()
+                print("model: ", cfg.model, " (config)", sep="")
+            except:
+                ckpt = cfg.model.copy()
+                print("model: ", cfg.model, " (config path)", sep="")
         else:
             ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
 
     # Optional group-128 int4 weights (QWEN_Q4=1). Projection weights become int4
     # (embed/lm-head stays bf16); ~4x smaller + ~2x faster decode, at a quality
     # cost that is coherent on the 3B but degrades the 0.5B (see model.QMat).
-    var q4 = String(getenv("QWEN_Q4")) == "1"
+    var q4 = cfg.q4   # config `q4` (with $QWEN_Q4 override), applied in load_config()
     print("loading tokenizer + weights…")
     # Prefer the checkpoint's own HuggingFace tokenizer.json (what the native
     # downloader fetches) so a freshly downloaded model serves with no tok-capture;
@@ -753,7 +822,7 @@ def main() raises:
 
     # Disk-backed prefix cache (per model), survives restarts.
     var kvdir = String(getenv("HOME")) + "/.cache/millrace/kv/" + _slug(model_id)
-    var bcache = BlockCache(kvdir, BLOCK_TOK, w.nkv, w.nlayers, KV_BUDGET_BYTES, model_id)
+    var bcache = BlockCache(kvdir, BLOCK_TOK, w.nkv, w.nlayers, cfg.kv_budget_mb * 1024 * 1024, model_id)  # MiB -> bytes
     if bcache.enabled:
         print("  kv-cache: ", kvdir, " (", len(bcache.order), " blocks cached, cap ",
               bcache.max_blocks, " blocks)", sep="")
@@ -765,10 +834,10 @@ def main() raises:
     sp.init_pointee_move(state^)
     var api = Api(sp)
 
-    print("millrace serving on http://127.0.0.1:", PORT, "  (flare)  v", MILLRACE_VERSION, sep="")
+    print("millrace serving on http://127.0.0.1:", cfg.port, "  (flare)  v", MILLRACE_VERSION, sep="")
     print("  GET  /v1/models")
     print("  GET  /v1/version")
     print("  POST /v1/chat/completions  (stream + non-stream)")
     print("  POST /v1/responses         (stream + non-stream)")
-    var srv = HttpServer.bind(SocketAddr.localhost(UInt16(PORT)))
+    var srv = HttpServer.bind(SocketAddr.localhost(UInt16(cfg.port)))
     srv.serve(api^)

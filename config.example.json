@@ -1,0 +1,6 @@
+{
+  "port": 8000,
+  "model": "Qwen/Qwen2.5-3B-Instruct",
+  "q4": false,
+  "kv_budget_mb": 8192
+}
