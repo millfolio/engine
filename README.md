@@ -38,10 +38,26 @@ higher-is-better for decode.
 
 We're ~3× slower on decode and several× on prefill. The decode gap is **per-token
 Metal dispatch overhead** (closed from ~5× to ~3× by the kernel fusions in this
-repo). The prefill gap is a **toolchain ceiling**: MLX hits 3–4 TFLOP/s via
-register-blocked `simdgroup_matrix` (compact 2-floats/thread fragments), which
-isn't reachable from Mojo on the M4 today — our `external_call` path tops out at
-~1.1 TFLOP/s. Details + raw numbers in [`bench/results/`](bench/results/).
+repo). The prefill gap is a **fragment-ABI ceiling** — verified on the latest
+nightly (`1.0.0b2.dev2026060906`) on this M4, *not* a question of intrinsic
+access:
+
+- We **do** reach the 8×8 `simdgroup_matrix` units via `external_call` (the
+  shipped 32×32 kernel, ~1.1 TFLOP/s — ~4.5× a scalar matmul).
+- MLX's 3–4 TFLOP/s comes from keeping **compact** fragments (2 floats/thread)
+  register-resident across the K-loop. Mojo's `external_call` only exposes the
+  **full** 8×8 fragment (`SIMD[f32,64]`), so register-blocking — the MLX lever —
+  *spills* and runs **~8× slower** (`.scratch/simd2_gemm.mojo`: 0.14 vs 1.14
+  TFLOP/s, current *and* latest nightly). So ~1.1 TFLOP/s is the best reachable
+  with this ABI.
+- The compact 16×16 op (returns `SIMD[f32,8]`) now **compiles** via
+  `llvm_intrinsic` (the Mojo-side gate is gone), but the **M4 GPU rejects it**:
+  `simdgroup_matrix<16,16x16>` needs GPUFamily10 — i.e. **M5+ silicon**
+  (`.scratch/mma16_test.mojo`).
+
+So closing the prefill gap on the M4 needs Modular to expose the **compact 8×8
+fragment** representation; the 16×16 shortcut is hardware-gated to M5. Details +
+raw numbers in [`bench/results/`](bench/results/).
 
 ## Prerequisites
 
