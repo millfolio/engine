@@ -69,7 +69,7 @@ comptime PORT = 8000
 # scheme for now; wire to a real build/version source later.
 comptime MILLRACE_VERSION = "0.1.0"
 
-# minja2 Value tags (value.mojo)
+# jinja2.mojo Value tags (value.mojo)
 comptime VBOOL = 2
 comptime VINT = 3
 comptime VFLOAT = 4
@@ -177,7 +177,7 @@ def responses_to_chat(bv: Value) raises -> Optional[Value]:
     We support the common `input`-as-string form (+ optional top-level
     `instructions` → system message); array `input` returns None (→ 400). Built
     by re-emitting JSON and reparsing so we reuse parse_json + render_value
-    rather than constructing minja2 Values by hand."""
+    rather than constructing jinja2.mojo Values by hand."""
     if bv.map_get("messages"):
         return bv  # already chat-shaped (tools, if any, ride along)
     var inp = bv.map_get("input")
@@ -721,7 +721,7 @@ def _config_atoi(s: String, default: Int) -> Int:
 def load_config() -> Config:
     """Load ~/.config/millrace/config.json (override path: $MILLRACE_CONFIG).
     Recognized keys: port (int), model (str), q4 (bool), kv_budget_mb (int, MiB).
-    Parsed with the same minja2 json the server already uses for requests."""
+    Parsed with the same jinja2.mojo json the server already uses for requests."""
     var port = Int(PORT)
     var model = String("")
     var q4 = False

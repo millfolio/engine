@@ -32,7 +32,7 @@ forward pass on Metal is expected to be coherent where driving MAX's was not.
 3. **Tokenize in pure Mojo.** Byte-level BPE (`Qwen2Tokenizer`) for
    encode/decode, from the shipped `vocab.json` + `merges.txt`.
 4. **Template in pure Mojo.** Render the chat prompt via
-   [`../minja2`](../minja2/docs/requirements.md) (the Jinja2-subset engine built
+   [`../jinja2.mojo`](../jinja2.mojo/docs/requirements.md) (the Jinja2-subset engine built
    for exactly this).
 5. **Generate.** A greedy decode loop with a KV cache that produces text
    **token-for-token identical to the reference** — **MAX running on CPU/float32**
@@ -187,7 +187,7 @@ v1 requirement.
         │                                                 ▲
         ▼                                                 │
   ┌───────────┐   ids   ┌──────────────┐  logits  ┌──────────────┐
-  │ minja2    │────────►│ Tokenizer    │─────────►│ Qwen2 model  │
+  │ jinja2.mojo    │────────►│ Tokenizer    │─────────►│ Qwen2 model  │
   │ (template)│         │ (BPE encode) │          │ 24 layers,KV │
   │  (host)   │         │   (host)     │          │ GPU / Metal  │
                               ▲                    └──────┬───────┘
@@ -214,30 +214,30 @@ tokens (`<|im_start|>` etc.) are matched verbatim before BPE. This is a real
 component to build in Mojo (max-backend let MAX own it); pre-tokenization uses
 Qwen's GPT-2 regex split.
 
-### 5.3 Chat templating (minja2) — wired
-The prompt string is produced by [`../minja2`](../minja2/docs/requirements.md)
+### 5.3 Chat templating (jinja2.mojo) — wired
+The prompt string is produced by [`../jinja2.mojo`](../jinja2.mojo/docs/requirements.md)
 rendering the real Qwen2.5 `chat_template` (vendored at
 `assets/qwen2.5-chat-template.jinja`) with `add_generation_prompt=true`.
 `src/chat.mojo` compiles the template once and renders it per request.
-`render_request(tmpl, body)` parses the OpenAI request body with minja2's
+`render_request(tmpl, body)` parses the OpenAI request body with jinja2.mojo's
 `parse_json` and passes its **full `messages` history and `tools`** straight
 through (the same inputs `apply_chat_template` takes), adding
 `add_generation_prompt`; `render_chat(tmpl, user)` is the single-turn convenience
-the CLI uses. minja2 compiles cleanly under the same 1.0.0b2 nightly the GPU
+the CLI uses. jinja2.mojo compiles cleanly under the same 1.0.0b2 nightly the GPU
 engine needs (unlike flare, §11 #11) and is pulled in at build time via
-`-I ../minja2/src`. No BOS is added (`bos_token: null`).
+`-I ../jinja2.mojo/src`. No BOS is added (`bos_token: null`).
 
 **Verified byte-identical to `transformers.apply_chat_template`** on multi-turn
 (system+user+assistant+user), no-system multi-turn, and a tools request
-(`.scratch/verify_minja2_multiturn.py`). Two minja2 fixes were needed so it
+(`.scratch/verify_jinja2.mojo_multiturn.py`). Two jinja2.mojo fixes were needed so it
 matches the *real* `apply_chat_template` rather than the vanilla
 `jinja2.Environment(StrictUndefined)` its conformance harness uses as reference:
 (a) `not`/`and`/`or` treat undefined as falsy (so `not message.tool_calls` works
 on assistant turns), and (b) `tojson` preserves insertion order
 (`sort_keys=False`, as transformers configures jinja2) so tool definitions match
-byte-for-byte. These diverge from minja2's current conformance reference (which
+byte-for-byte. These diverge from jinja2.mojo's current conformance reference (which
 is itself mis-configured vs transformers) — re-orienting that reference is a
-minja2 follow-up. Live: multi-turn "Add 10 to that." after "2+2=4" → "11"; a
+jinja2.mojo follow-up. Live: multi-turn "Add 10 to that." after "2+2=4" → "11"; a
 `get_weather` tools request → a well-formed `<tool_call>`.
 
 ### 5.4 KV cache
@@ -295,7 +295,7 @@ positions), so it is verifiable in isolation with no other component built.
 
 ## 7. Conformance methodology
 
-Same philosophy as minja2's byte-equality (its §9): **one authoritative signal**,
+Same philosophy as jinja2.mojo's byte-equality (its §9): **one authoritative signal**,
 checked against a trusted oracle.
 
 - **Two oracles, by altitude (both CPU/f32, numerically equivalent):**
@@ -325,7 +325,7 @@ checked against a trusted oracle.
      the reference for N tokens on a fixed prompt set. **Done — 8/8 ids match HF
      incl. EOS (§11 #8).**
 - **Corpus:** a handful of fixed prompts (single-turn, multi-turn,
-  system+user) rendered through minja2, mirroring minja2's context corpus.
+  system+user) rendered through jinja2.mojo, mirroring jinja2.mojo's context corpus.
 - Because these checks need the **GPU + weights + MAX**, they live under
   `tests/manual/` and run via pixi tasks (e.g. `pixi run gpu-check`), per repo
   `CLAUDE.md` — not in the pure-Python/Mojo unittest suite.
@@ -340,7 +340,7 @@ runtime path.
   **No `max` runtime dependency** for the engine itself (the whole point). A
   separate `dev`/`test` feature pulls `max` (the CPU oracle, §7) — and/or
   `transformers` + `torch` — plus `huggingface_hub` to fetch weights.
-- minja2 is consumed as a pixi git dependency (or path dep during co-development),
+- jinja2.mojo is consumed as a pixi git dependency (or path dep during co-development),
   like max-backend pulls flare.
 - **Env caveat (inherited from max-backend §8 #5):** MAX bakes *absolute* paths
   into its env at install time, so the test/oracle env is not relocatable —
@@ -500,7 +500,7 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
     weight load → greedy `generate` → `tokenizer.decode`. `pixi run chat --
     "What is the capital of France?"` → `The capital of France is Paris.`; a haiku
     prompt yields a coherent haiku. The first fully self-contained run of the
-    engine as an application. (Now renders the real chat template via ../minja2,
+    engine as an application. (Now renders the real chat template via ../jinja2.mojo,
     §5.3 — the hardcoded template it shipped with was replaced.)
 
 11. **OpenAI-compatible HTTP server works — now on flare, the version conflict
@@ -519,13 +519,13 @@ Run on this machine (osx-arm64, Apple M4, Mojo 1.0.0b2 nightly).
     a source-level `-I ../flare` build doesn't produce — so the `flare-tls` pixi
     task rebuilds it from the fork's own `openssl_wrapper.cpp` against the env's
     OpenSSL into `build/`. The engine consumes flare locally via `-I ../flare`
-    (like minja2), not as a conda/git dep — no Mojo-version lockstep.
+    (like jinja2.mojo), not as a conda/git dep — no Mojo-version lockstep.
     The handler is one `Api(Handler)` struct doing manual method+path routing; it
     carries an `UnsafePointer[ServerState]` to the heap-loaded model so flare's
     read-only `serve(self,…)` borrow can still reach `mut Weights` (the GPU
     kernels bind mutable buffers) — safe because the reactor is single-threaded
     (one request in flight). Endpoints: `GET /v1/models`, `POST /v1/chat/completions`,
-    and `POST /v1/responses` (OpenAI Responses API). It parses bodies with minja2's
+    and `POST /v1/responses` (OpenAI Responses API). It parses bodies with jinja2.mojo's
     `parse_json` and **honors OpenAI request params**: full `messages` history +
     `tools` (§5.3), `max_tokens`/`max_output_tokens` (→ `finish_reason`
     `stop`/`length`), and `temperature`/`top_p`/`top_k` — greedy when `temperature`
@@ -645,14 +645,14 @@ files are thin verification gates that drive it against the `*-capture` fixtures
   loader, the op launchers over the kernels, `Weights`, `layer_cached` (prefill
   and decode), `argmax_last`, and greedy `generate`. Hardcoded to Qwen2.5-0.5B.
 - `src/tokenizer.mojo` — byte-level BPE `Tokenizer` + `load_tokenizer`.
-- `src/chat.mojo` — chat-template rendering via ../minja2 (`load_chat_template`,
-  `render_chat`); built with `-I ../minja2/src`. Template at
+- `src/chat.mojo` — chat-template rendering via ../jinja2.mojo (`load_chat_template`,
+  `render_chat`); built with `-I ../jinja2.mojo/src`. Template at
   `assets/qwen2.5-chat-template.jinja`.
 - `src/testio.mojo` — fixture readers + device-buffer comparison helpers (gates only).
 
 **Applications (`main`):**
 - `src/main.mojo` — the `chat` CLI (prompt → text). `src/server.mojo` — the
-  `serve` HTTP server. Both: minja2 template → tokenizer → GPU `generate` → JSON/text.
+  `serve` HTTP server. Both: jinja2.mojo template → tokenizer → GPU `generate` → JSON/text.
 
 **Gates (`main`, import the library) and their oracle captures:**
 - `test_attention` ← `attn-capture` · `test_kernels` ← `kernels-capture`
@@ -662,5 +662,5 @@ files are thin verification gates that drive it against the `*-capture` fixtures
 
 A `pixi run test-<x>` runs a gate (default env, GPU); `pixi run <x>-capture`
 regenerates its fixtures from HF/torch (oracle env). The capture scripts live in
-`tests/manual/<x>_spike/`. Remaining: full Jinja coverage is minja2's domain
+`tests/manual/<x>_spike/`. Remaining: full Jinja coverage is jinja2.mojo's domain
 (its conformance suite); the server stays minimal (no SSE/concurrency, §11 #11).

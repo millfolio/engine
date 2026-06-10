@@ -105,7 +105,7 @@ curl -s localhost:8000/v1/chat/completions \
 ## Configuration
 
 Optional config at `~/.config/millrace/config.json` (override the path with
-`MILLRACE_CONFIG`), parsed with the same minja2 json the server uses for requests.
+`MILLRACE_CONFIG`), parsed with the same jinja2.mojo json the server uses for requests.
 All keys are optional — see [`config.example.json`](config.example.json):
 
 | key | default | notes / env override |

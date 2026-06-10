@@ -160,7 +160,7 @@ def repair_json(s: String) -> String:
 def _try_parse(txt: String) -> Optional[Value]:
     """Repair to balanced JSON, then parse; None if still unparseable.
 
-    We repair *first* rather than trying strict parse and falling back: minja2's
+    We repair *first* rather than trying strict parse and falling back: jinja2.mojo's
     parse_json indexes past the end of truncated input and hard-*crashes* (assert)
     instead of raising, which `except` can't catch — so we must never hand it
     unbalanced text. repair_json is identity on already-valid JSON, so well-formed

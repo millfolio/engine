@@ -416,7 +416,7 @@ def _str_bytes(s: String) -> List[UInt8]:
 
 def _parse_shard_names(buf: List[UInt8]) raises -> List[String]:
     """Distinct shard filenames from a safetensors `model.safetensors.index.json`
-    weight_map. Reuses the tiny safetensors-header JSON helpers (no minja2 dep, so
+    weight_map. Reuses the tiny safetensors-header JSON helpers (no jinja2.mojo dep, so
     model.mojo still builds without the -I include the tests use)."""
     var names = List[String]()
     var pos = 0

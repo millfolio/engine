@@ -74,9 +74,9 @@ test-generate = { cmd = "mkdir -p build && mojo build src/test_generate.mojo -o 
 test-sample = "mojo run src/test_sample.mojo"
 
 # Phase 6b tool-calling: parse the model's <tool_call> blocks into structured
-# calls (src/toolcall.mojo). Pure CPU + JSON, no GPU/fixtures. -I ../minja2/src
+# calls (src/toolcall.mojo). Pure CPU + JSON, no GPU/fixtures. -I ../jinja2.mojo/src
 # for the JSON parser/serializer.
-test-toolcall = "mojo run -I ../minja2/src src/test_toolcall.mojo"
+test-toolcall = "mojo run -I ../jinja2.mojo/src src/test_toolcall.mojo"
 
 # Disk block KV-cache roundtrip (src/blockcache.mojo): store -> corrupt -> restore
 # bit-identical, chained-hash determinism, collision guard. Needs the GPU.
@@ -85,13 +85,13 @@ test-blockcache = "mojo run src/test_blockcache.mojo"
 # Manual GPU gate: greedy-parity of the simdgroup-matrix prefill GEMM — generate
 # the same prompt with the scalar vs simd GEMM and assert identical tokens. Needs
 # weights + Metal GPU. Usage: pixi run simd-parity [-- "prompt"].
-simd-parity = { cmd = "mojo build tests/manual/simd_parity.mojo -I src -I ../minja2/src -o build/simd_parity && ./build/simd_parity" }
+simd-parity = { cmd = "mojo build tests/manual/simd_parity.mojo -I src -I ../jinja2.mojo/src -o build/simd_parity && ./build/simd_parity" }
 
 # int8 quantization eval (shelved investigation, kept for repro). int8-quality:
 # per-channel int8 RTN fake-quant vs bf16 — recon error, teacher-forced top-1 +
 # KL drift, greedy divergence. Needs weights + GPU. int8-gemv-bench: int8 (naive
 # + vectorized int8x4) vs bf16 decode GEMV bandwidth; GPU only, no weights.
-int8-quality = { cmd = "mkdir -p build && mojo build tests/manual/int8_quality.mojo -I src -I ../minja2/src -o build/int8_quality && ./build/int8_quality" }
+int8-quality = { cmd = "mkdir -p build && mojo build tests/manual/int8_quality.mojo -I src -I ../jinja2.mojo/src -o build/int8_quality && ./build/int8_quality" }
 int8-gemv-bench = { cmd = "mkdir -p build && mojo build tests/manual/int8_gemv_bench.mojo -I src -o build/int8_gemv_bench && ./build/int8_gemv_bench" }
 
 # group-128 int4 validation (see model.QMat). q4-kernels: int4 GEMV + simd GEMM
@@ -99,8 +99,8 @@ int8-gemv-bench = { cmd = "mkdir -p build && mojo build tests/manual/int8_gemv_b
 # wired int4 vs bf16 top-1/KL on the real model (needs weights). int4-quality:
 # fake-quant scheme sweep (int8/int4 per-channel/group) vs bf16 (needs weights).
 q4-kernels = { cmd = "mkdir -p build && mojo build tests/manual/q4_kernels.mojo -I src -o build/q4_kernels && ./build/q4_kernels" }
-q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../minja2/src -o build/q4_validate && ./build/q4_validate" }
-int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../minja2/src -o build/int4_quality && ./build/int4_quality" }
+q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../jinja2.mojo/src -o build/q4_validate && ./build/q4_validate" }
+int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../jinja2.mojo/src -o build/int4_quality && ./build/int4_quality" }
 
 # Cross-engine benchmark (millrace vs mlx_lm.server vs Ollama): TTFT, decode
 # tok/s, cold/warm prefix. Stdlib python, no GPU build. Start the servers first
@@ -110,10 +110,10 @@ bench = { cmd = "python3 bench/bench.py" }
 # Phase 6a end-to-end chat CLI (ARCHITECTURE.md §6): prompt -> text, pure Mojo on
 # the GPU. Usage: pixi run chat -- "Your question". Needs tok-capture (tokenizer
 # tables) + a checkpoint path ($QWEN_SAFETENSORS or forward-capture's meta).
-chat = { cmd = "mkdir -p build && mojo build src/main.mojo -I ../minja2/src -o build/chat && ./build/chat" }
+chat = { cmd = "mkdir -p build && mojo build src/main.mojo -I ../jinja2.mojo/src -o build/chat && ./build/chat" }
 
 # Phase 6b OpenAI-compatible HTTP server, pure Mojo on the GPU over flare.
-# Listens on 127.0.0.1:8000. -I ../minja2/src: chat templating (§5.3). -I ../flare:
+# Listens on 127.0.0.1:8000. -I ../jinja2.mojo/src: chat templating (§5.3). -I ../flare:
 # the kqueue reactor / Router / SSE, reused from max-backend (§11 #11 — the fork
 # now builds under 1.0.0b2). flare-tls builds libflare_tls.so (raw socket I/O +
 # TLS FFI) from the fork's own C++ source against the env's OpenSSL. flare's
@@ -124,7 +124,7 @@ flare-tls = { cmd = "clang++ -O2 -std=c++17 -fPIC -DNDEBUG -shared -o $CONDA_PRE
 # pass its HF id (resolved from the local cache) or a checkpoint path:
 #   pixi run serve -- Qwen/Qwen2.5-3B-Instruct
 # The server reports the served model at /v1/models.
-serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../minja2/src -I ../flare -o build/server && ./build/server", depends-on = ["flare-tls"] }
+serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/server && ./build/server", depends-on = ["flare-tls"] }
 
 # Native-Mojo Qwen weights downloader — no huggingface_hub / no Python HF wheel.
 # Fetches safetensors (single-file for 0.5B, sharded for 3B) + config + tokenizer

@@ -6,11 +6,11 @@
 #
 #   mojo-backend/   src + assets +
 #                   build/{libflare_tls.so + libssl.3 + libcrypto.3, rpath-fixed}
-#   minja2/src/     vendored minja2 (chat templating / JSON)
+#   jinja2.mojo/src/     vendored jinja2.mojo (chat templating / JSON)
 #   flare/flare/    vendored flare package (HTTP server)
 #
 # so the app can run:
-#   (cd mojo-backend && mojo build src/server.mojo -I ../minja2/src -I ../flare -o build/server)
+#   (cd mojo-backend && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/server)
 #
 # We ship the prebuilt libflare_tls.so (building it needs clang + OpenSSL) and
 # its OpenSSL dylibs, made relocatable via @loader_path so the server finds them
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MINJA2="${MINJA2:-$ROOT/../minja2}"
+JINJA2="${JINJA2:-$ROOT/../jinja2.mojo}"
 FLARE="${FLARE:-$ROOT/../flare}"
 OUT="${1:-$ROOT/runner.zip}"
 PREFIX="${CONDA_PREFIX:?run via pixi — need CONDA_PREFIX for libflare_tls.so + OpenSSL}"
@@ -51,13 +51,13 @@ install_name_tool \
     "$B/build/libflare_tls.so"
 codesign --force --sign - "$B/build/libflare_tls.so" 2>/dev/null || true
 
-echo "==> staging minja2 + flare" >&2
-mkdir -p "$STAGE/minja2" "$STAGE/flare"
-cp -R "$MINJA2/src" "$STAGE/minja2/src"
+echo "==> staging jinja2.mojo + flare" >&2
+mkdir -p "$STAGE/jinja2.mojo" "$STAGE/flare"
+cp -R "$JINJA2/src" "$STAGE/jinja2.mojo/src"
 cp -R "$FLARE/flare" "$STAGE/flare/flare"
 
 echo "==> zipping -> $OUT" >&2
 rm -f "$OUT"
-( cd "$STAGE" && zip -qr -X "$OUT" mojo-backend minja2 flare )
+( cd "$STAGE" && zip -qr -X "$OUT" mojo-backend jinja2.mojo flare )
 echo "==> done" >&2
 ls -lh "$OUT" >&2

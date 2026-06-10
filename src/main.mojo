@@ -6,7 +6,7 @@ the GPU (ARCHITECTURE.md §6 Phase 6, §1). This is the "it runs as a program"
 milestone: the first fully pure-Mojo prompt→text path.
 
 The chat template is the Qwen2.5 no-tools branch, hardcoded (a full Jinja render
-via ../minja2 is the general path, §5.3). The checkpoint path comes from
+via ../jinja2.mojo is the general path, §5.3). The checkpoint path comes from
 $QWEN_SAFETENSORS or tests/fixtures/forward/meta.txt; the tokenizer tables from
 tests/fixtures/tokenizer/ (run `tok-capture` once).
 

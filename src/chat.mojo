@@ -1,11 +1,11 @@
-"""Chat-template rendering via minja2 (ARCHITECTURE.md §5.3).
+"""Chat-template rendering via jinja2.mojo (ARCHITECTURE.md §5.3).
 
 Renders the model's real Jinja chat template (assets/qwen2.5-chat-template.jinja)
-with the ../minja2 engine, replacing the hardcoded no-tools template the CLI and
-server used. The messages context is built as JSON and parsed into a minja2
+with the ../jinja2.mojo engine, replacing the hardcoded no-tools template the CLI and
+server used. The messages context is built as JSON and parsed into a jinja2.mojo
 `Value` (simpler than constructing values by hand). Compile once, render many.
 
-Built with `-I ../minja2/src` so minja2's modules resolve (it compiles cleanly
+Built with `-I ../jinja2.mojo/src` so jinja2.mojo's modules resolve (it compiles cleanly
 under the same 1.0.0b2 nightly the GPU engine needs — unlike flare, §11 #11).
 """
 
