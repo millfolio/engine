@@ -369,6 +369,65 @@ def gen_full(mut s: ServerState, ids: List[Int], max_new: Int,
 # ── JSON envelopes ───────────────────────────────────────────────────────────
 
 
+def html_response(s: String) -> Response:
+    """200 with a text/html body (for the built-in chat page at `/`)."""
+    var resp = Response(status=Status.OK, reason="OK", body=to_bytes(s))
+    try:
+        resp.headers.set("Content-Type", "text/html; charset=utf-8")
+    except:
+        pass
+    return resp^
+
+def chat_page() -> String:
+    """A minimal self-contained chat UI served at `/` — streams from
+    /v1/chat/completions and shows the per-request `millrace` stats (prefill cost
+    + throughput) under each answer. The whole point: surface the timing the
+    server logs to stdout in the browser. No backslash escapes (the SSE newline
+    is built with String.fromCharCode) so this stays a verbatim Mojo string."""
+    return """<!doctype html><html><head><meta charset="utf-8"><title>millrace</title>
+<style>
+ :root{--bg:#122632;--ink:#eaf1f6;--muted:#9fb4c2;--accent:#ff7a1c;--line:rgba(159,180,194,.18)}
+ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,Inter,system-ui,sans-serif}
+ main{max-width:720px;margin:0 auto;padding:2rem 1.25rem}
+ h1{font-size:1.5rem;letter-spacing:-.02em;margin:0 0 .25rem} .sub{color:var(--muted);font-size:.85rem;margin:0 0 1.5rem}
+ #log .msg{margin:.9rem 0} #log b{color:var(--accent)}
+ .stats{color:var(--muted);font:12px/1.5 ui-monospace,Menlo,monospace;margin:.2rem 0 0;
+        border-left:2px solid rgba(255,122,28,.4);padding-left:.6rem}
+ form{display:flex;gap:.5rem;margin-top:1.25rem}
+ input{flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:8px;
+       color:var(--ink);padding:.6rem .8rem;font:inherit}
+ button{background:var(--accent);border:0;border-radius:8px;color:#1a1207;font-weight:600;padding:0 1.1rem;cursor:pointer}
+</style></head><body><main>
+ <h1>millrace</h1><p class="sub" id="model">local chat — with prefill + throughput stats</p>
+ <div id="log"></div>
+ <form id="f"><input id="q" placeholder="Ask something..." autocomplete="off" autofocus><button>Send</button></form>
+<script>
+ var NL=String.fromCharCode(10);
+ fetch('/v1/models').then(function(r){return r.json()}).then(function(d){
+   if(d.data&&d.data[0])document.getElementById('model').textContent='model: '+d.data[0].id;});
+ function add(who,cls){var d=document.createElement('div');d.className='msg';
+   d.innerHTML='<b>'+who+':</b> ';var s=document.createElement('span');d.appendChild(s);
+   document.getElementById('log').appendChild(d);return {span:s,div:d};}
+ document.getElementById('f').onsubmit=async function(e){
+   e.preventDefault();var inp=document.getElementById('q');var q=inp.value.trim();if(!q)return;inp.value='';
+   add('you','');document.getElementById('log').lastChild.lastChild.textContent=q;
+   var out=add('millrace');var st=document.createElement('div');st.className='stats';st.textContent='generating...';
+   out.div.appendChild(st);
+   var r=await fetch('/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({stream:true,messages:[{role:'user',content:q}]})});
+   var rd=r.body.getReader(),dec=new TextDecoder(),buf='';
+   while(true){var x=await rd.read();if(x.done)break;buf+=dec.decode(x.value,{stream:true});
+     var i;while((i=buf.indexOf(NL+NL))>=0){var frame=buf.slice(0,i);buf=buf.slice(i+2);
+       var parts=frame.split(NL),line='';for(var k=0;k<parts.length;k++){if(parts[k].indexOf('data:')===0)line=parts[k];}
+       if(!line)continue;var data=line.slice(5).trim();if(data==='[DONE]')continue;
+       var o;try{o=JSON.parse(data)}catch(_){continue}
+       var ch=o.choices&&o.choices[0]&&o.choices[0].delta&&o.choices[0].delta.content;if(ch)out.span.textContent+=ch;
+       if(o.millrace){var m=o.millrace;st.textContent='prefill '+m.prefill_ms+' ms  ·  '+m.tok_per_s+' tok/s  ·  prompt '
+         +m.prompt_tokens+' (reused '+m.reused+', prefilled '+m.prefilled+')  ·  gen '+m.gen_tokens+' tok';}
+     }document.getElementById('log').scrollTop=1e9;}
+ };
+</script></main></body></html>"""
+
 def service_unavailable(msg: String) -> Response:
     """503 with a JSON error body (flare has no built-in 503 helper)."""
     var resp = Response(status=Status.SERVICE_UNAVAILABLE, reason="Service Unavailable",
@@ -594,8 +653,10 @@ struct Api(Handler, Copyable, Movable):
         var path = req.url
         var is_post = req.method == Method.POST
 
-        if path == "/" or path == "/health":
+        if path == "/health":
             return ok("millrace ok")
+        if path == "/":
+            return html_response(chat_page())
         if path == "/v1/models":
             return ok_json(models_json(self.st[].model_id, self.st[].embed_id))
         if path == "/v1/version":
