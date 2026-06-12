@@ -5,8 +5,9 @@
 A from-scratch, **pure-Mojo** GPU inference engine for **Qwen2.5** (0.5B and 3B)
 on Apple Silicon (Metal), served over an OpenAI-compatible HTTP API. Every GPU
 kernel — matmul, attention, RMSNorm, RoPE, SwiGLU, the int4 dequant path — is
-custom-written in Mojo (Apple's `simdgroup_matrix` units reached via AIR
-`external_call`); there are **no C++ / CUDA / Metal-shader GPU dependencies**.
+custom-written in Mojo (Apple's `simdgroup_matrix` units reached via the AIR
+`llvm.air.simdgroup_matrix_8x8_multiply_accumulate` intrinsic); there are **no
+C++ / CUDA / Metal-shader GPU dependencies**.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## How it compares
@@ -33,31 +34,43 @@ higher-is-better for decode.
 | metric (3B, 4-bit)            | **millrace** (int4) | MLX (4-bit) | Ollama (4-bit) |
 |-------------------------------|--------------------:|------------:|---------------:|
 | decode (tok/s)                |               ~18   |        52   |          47    |
-| prefill, ~70-tok prompt (ms)  |              540    |       220   |         165    |
-| prefill, ~1.5K-tok prompt (s) |               22    |       2.8   |         2.9    |
+| prefill, ~70-tok prompt (ms)  |       ~400 (was 540) |       220   |         165    |
+| prefill, ~1.5K-tok prompt (s) |        ~13 (was 22) |       2.8   |         2.9    |
 
 We're ~3× slower on decode and several× on prefill. The decode gap is **per-token
 Metal dispatch overhead** (closed from ~5× to ~3× by the kernel fusions in this
-repo). The prefill gap is a **fragment-ABI ceiling** — verified on the latest
-nightly (`1.0.0b2.dev2026060906`) on this M4, *not* a question of intrinsic
-access:
+repo). The prefill gap **used to be a fragment-ABI ceiling**; that ceiling is now
+**lifted** — Modular shipped the compact 8×8 op as an LLVM intrinsic, so the
+prefill GEMM is the **register-blocked compact-fragment kernel** that the old ABI
+blocked. The prefill numbers above are the projected end-to-end effect of the
+**measured ~1.95× GEMM speedup** below (GEMM-bound long prefill ≈ halves;
+short-prompt prefill improves less, being more attention/dispatch-bound). A full
+re-measure via `pixi run bench` (cross-engine, servers up) is pending; the
+kernel-level numbers are direct and reproducible:
 
-- We **do** reach the 8×8 `simdgroup_matrix` units via `external_call` (the
-  shipped 32×32 kernel, ~1.1 TFLOP/s — ~4.5× a scalar matmul).
-- MLX's 3–4 TFLOP/s comes from keeping **compact** fragments (2 floats/thread)
-  register-resident across the K-loop. Mojo's `external_call` only exposes the
-  **full** 8×8 fragment (`SIMD[f32,64]`), so register-blocking — the MLX lever —
-  *spills* and runs **~8× slower** (`.scratch/simd2_gemm.mojo`: 0.14 vs 1.14
-  TFLOP/s, current *and* latest nightly). So ~1.1 TFLOP/s is the best reachable
-  with this ABI.
-- The compact 16×16 op (returns `SIMD[f32,8]`) now **compiles** via
-  `llvm_intrinsic` (the Mojo-side gate is gone), but the **M4 GPU rejects it**:
-  `simdgroup_matrix<16,16x16>` needs GPUFamily10 — i.e. **M5+ silicon**
+- The prefill GEMM now uses the **compact** 8×8 fragment — `SIMD[f32,2]`
+  (2 floats/lane), the same representation MLX register-blocks. Each simdgroup
+  holds a 4×4 grid of 8×8 accumulator fragments (16 f32 accumulators/lane)
+  register-resident across the K-loop. It runs at **~2.1 TFLOP/s vs the old
+  external_call kernel's ~1.1** on the 3B prefill shapes (`.scratch/simd3_gemm.mojo`,
+  M4, latest nightly `1.0.0b3.dev2026061206`) — **~1.95×, and it does NOT spill**
+  (the prior full-`SIMD[f32,64]` register-blocking attempt spilled to 0.14
+  TFLOP/s; `.scratch/simd2_gemm.mojo`).
+- We reach it via `llvm_intrinsic["llvm.air.simdgroup_matrix_8x8_multiply_accumulate"]`
+  — Modular's pattern from
+  [`max/kernels/.../gpu/apple/matmul_8x8.mojo`](https://github.com/modular/modular/blob/cc40bcd8e77fa1133b5a5419f6c895809828a298/max/kernels/src/linalg/matmul/gpu/apple/matmul_8x8.mojo).
+  No `external_call`, no disassembled-symbol ABI. A runtime probe still gates the
+  path and falls back to the scalar tiled GEMM if the toolchain/GPU rejects it.
+- This 8×8 op runs on **M1–M4**. The compact **16×16** op (returns `SIMD[f32,8]`)
+  still **compiles** via `llvm_intrinsic` but the **M4 GPU rejects it**:
+  `simdgroup_matrix<16,16x16>` needs GPUFamily10 — **M5+ silicon**
   (`.scratch/mma16_test.mojo`).
 
-So closing the prefill gap on the M4 needs Modular to expose the **compact 8×8
-fragment** representation; the 16×16 shortcut is hardware-gated to M5. Details +
-raw numbers in [`bench/results/`](bench/results/).
+We still trail MLX on prefill (their ~3–4 TFLOP/s GEMM + a fully fused, larger
+threadgroup-tiled pipeline); the remaining gap is no longer ABI-bound but a
+tiling/occupancy gap (this kernel loads fragments straight from global memory
+with no threadgroup staging) plus the unchanged O(M²) attention. Details + raw
+numbers in [`bench/results/`](bench/results/).
 
 ## Prerequisites
 

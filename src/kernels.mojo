@@ -15,7 +15,7 @@ from std.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum, max as warp_max
 from std.memory import stack_allocation
 from std.collections import InlineArray
-from std.sys.info import external_call   # emit AIR simdgroup-matrix ops (see matmul_simd_kernel)
+from std.sys import llvm_intrinsic        # compact AIR simdgroup-matrix MMA (see matmul_simd_kernel)
 from layout import TileTensor, TensorLayout
 
 # Head/hidden dims are NOT fixed here: the head-sensitive kernels (rope_q/k,
@@ -220,35 +220,64 @@ def matmul_tiled_kernel[
 
 
 # ── simdgroup-matrix GEMM (prefill, opt-in via runtime capability gate) ────────
-# Apple's AIR simdgroup_matrix_8x8 ops run X·Wᵀ on the GPU's matrix units. They
-# are *external AIR functions* (not LLVM intrinsics), so `external_call` names
-# them — `llvm_intrinsic` can't (it only sees upstream LLVM intrinsics) and Metal
-# has no inline-asm dialect. The exact mangled symbols + signatures below were
-# verified by disassembling a compiled .metal (metal-objdump): the fragment is
-# <64 x float> (the whole 8x8 matrix), and load/store take three <2xi64> vectors
-# (dims, row-stride, origin). A runtime probe (model.probe_simd_gemm) checks the
-# toolchain accepts them and falls back to matmul_tiled_kernel otherwise — the
-# symbol names are not an API contract and a Metal toolchain bump could break
-# them (a mismatch is a catchable pipeline-state error, not a crash).
+# Apple's AIR simdgroup_matrix_8x8 multiply-accumulate runs X·Wᵀ on the GPU's
+# matrix units. Modular shipped the COMPACT 8×8 op as the LLVM intrinsic
+# `llvm.air.simdgroup_matrix_8x8_multiply_accumulate` (their
+# max/kernels/.../gpu/apple/matmul_8x8.mojo, commit cc40bcd — see
+# .scratch/ref_matmul_8x8.mojo), so we reach it via `llvm_intrinsic`, no
+# external_call / no disassembled-symbol ABI. The fragment is COMPACT —
+# SIMD[f32,2] (2 floats per lane), so the whole MxN accumulator grid stays
+# register-resident across the K-loop. That is the MLX register-blocking lever
+# the old full-`SIMD[f32,64]` external_call ABI blocked: it spilled
+# (.scratch/simd2_gemm.mojo, 0.14 TFLOP/s). The compact path does NOT spill and
+# runs ~2× the external_call kernel on the M4 (~2.1 vs ~1.1 TFLOP/s).
 #
-# Each threadgroup computes a 32×32 output tile with 4 simdgroups; per k-step it
-# stages an X block (32×8) and a transposed+widened W block (8×32, so the fragment
-# orientation yields X·Wᵀ) into threadgroup memory, then each simdgroup loads one
-# 8×8 A-fragment and reuses it across 4 B-column fragments — 16 MACs/threadgroup,
-# f32 accumulate. The 32×32 tiling cuts redundant device traffic ~4× vs a naive
-# 8×8-per-simdgroup kernel (which is memory-bandwidth-bound), giving ~4.5× the
-# scalar matmul_tiled_kernel (~1.1 TFLOP/s vs ~250 GFLOP/s on the M4). Output is
-# f32 like the scalar path but NOT bit-identical (hardware FMA/order differ;
-# measured |Δ| ≲ 2.4e-6), so greedy-parity is re-checked after integration.
-comptime _SG_FRAG = SIMD[DType.float32, 64]   # an 8×8 fragment = the whole matrix
-comptime _SG_V2 = SIMD[DType.int64, 2]
-comptime _SG_LD = "air.simdgroup_matrix_8x8_load.v64f32.p3f32"
-comptime _SG_MAC = "air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32"
-comptime _SG_ST = "air.simdgroup_matrix_8x8_store.v64f32.p3f32"
-comptime SG_BM = 32              # threadgroup output rows
-comptime SG_BN = 32              # threadgroup output cols
-comptime SG_NCT = 4              # column-tiles per simdgroup (SG_BN // 8)
-comptime SG_TPB = 128            # threads/block = (SG_BM // 8) simdgroups × 32
+# Layout (Modular's `_frag8_layout`, ground-truthed via Metal `thread_elements()`):
+# lane owns (frow, fcol) and (frow, fcol+1). Each threadgroup computes a 64×64
+# output tile with 4 simdgroups; each simdgroup owns a 32×32 subtile = a 4×4 grid
+# of 8×8 fragments (16 f32 accumulators / lane). Fragments load DIRECTLY from
+# global memory at the lane's computed slot — no threadgroup staging, no barriers.
+# K-loop steps by 8; the final partial-K block (K%8≠0) is masked. f32 accumulate;
+# output is f32 but NOT bit-identical to the scalar path (hardware FMA/order
+# differ; measured |Δ| ≲ 1.5e-4 at prefill sizes), so greedy-parity is re-checked.
+#
+# A runtime probe (model.probe_simd_gemm) still gates the path and falls back to
+# matmul_tiled_kernel if the toolchain/GPU rejects the intrinsic. (The compact
+# 16×16 op is hardware-gated to M5/GPUFamily10 — see .scratch/mma16_test.mojo —
+# but this 8×8 op runs on M1–M4.)
+comptime _MMA8 = 8
+comptime _FRAG8 = 2              # 8×8 = 64 elems / 32 lanes = 2 floats per lane
+comptime SG_BM = 64              # threadgroup output rows
+comptime SG_BN = 64              # threadgroup output cols
+comptime _SG_SGM = SG_BM // 2    # 32 — simdgroup subtile rows
+comptime _SG_SGN = SG_BN // 2    # 32 — simdgroup subtile cols
+comptime _SG_NTM = _SG_SGM // _MMA8   # 4 row-fragments per simdgroup
+comptime _SG_NTN = _SG_SGN // _MMA8   # 4 col-fragments per simdgroup
+comptime SG_TPB = 4 * 32         # 128 threads/block = 4 simdgroups × 32
+
+
+@always_inline
+def _frag8_layout(lane: Int) -> Tuple[Int, Int]:
+    """Apple 8×8 simdgroup-matrix per-lane layout (Modular's `_frag8_layout`,
+    ground-truthed via Metal `thread_elements()`). Lane owns (row, col_base) and
+    (row, col_base+1)."""
+    return (
+        ((lane & 6) >> 1) + ((lane & 16) >> 2),
+        ((lane & 1) << 1) + ((lane & 8) >> 1),
+    )
+
+
+@always_inline
+def _mma8x8(
+    a: SIMD[DType.float32, _FRAG8],
+    b: SIMD[DType.float32, _FRAG8],
+    c: SIMD[DType.float32, _FRAG8],
+) -> SIMD[DType.float32, _FRAG8]:
+    """One 8×8×8 simdgroup-matrix multiply-accumulate: D = A·B + C (compact frag)."""
+    return llvm_intrinsic[
+        "llvm.air.simdgroup_matrix_8x8_multiply_accumulate",
+        SIMD[DType.float32, _FRAG8],
+    ](a, b, c)
 
 
 def matmul_simd_kernel[
@@ -263,75 +292,72 @@ def matmul_simd_kernel[
     N: Int,
     use_bias: Int,
 ):
-    """Y[M,N] = X[M,K] · W[N,K]ᵀ (+bias) on the simdgroup-matrix units. Same
-    signature/semantics as matmul_tiled_kernel; launch with grid_dim=
+    """Y[M,N] = X[M,K] · W[N,K]ᵀ (+bias) on the compact 8×8 simdgroup-matrix units.
+    Same signature/semantics as matmul_tiled_kernel; launch with grid_dim=
     (ceildiv(N,SG_BN), ceildiv(M,SG_BM)), block_dim=SG_TPB."""
     comptime assert X.flat_rank == 1
-    var tid = thread_idx.x
-    var sg = Int(tid) // 32                    # simdgroup id 0..3
-    var m0 = Int(block_idx.y) * SG_BM
-    var n0 = Int(block_idx.x) * SG_BN
+    var lane = Int(thread_idx.x) % 32
+    var fl = _frag8_layout(lane)
+    var frow = fl[0]
+    var fcol = fl[1]
+    var sg = Int(thread_idx.x) // 32           # simdgroup id 0..3
+    var row_base = Int(block_idx.y) * SG_BM + (sg // 2) * _SG_SGM
+    var col_base = Int(block_idx.x) * SG_BN + (sg % 2) * _SG_SGN
+    # Fully-interior subtile → unguarded loads (the common case).
+    var interior = (row_base + _SG_SGM <= M) and (col_base + _SG_SGN <= N)
 
-    var sA = stack_allocation[SG_BM * 8, Float32, address_space = AddressSpace.SHARED]()
-    var sB = stack_allocation[8 * SG_BN, Float32, address_space = AddressSpace.SHARED]()
-    var sC = stack_allocation[SG_BM * SG_BN, Float32, address_space = AddressSpace.SHARED]()
+    var xp = X.ptr
+    var wp = W.ptr
+    var acc = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM * _SG_NTN](
+        fill=SIMD[DType.float32, _FRAG8](0)
+    )
 
-    var dims = _SG_V2(8, 8)
-    var lay8 = _SG_V2(1, 8)                    # row stride 8  (sA is SG_BM×8)
-    var layN = _SG_V2(1, SG_BN)                # row stride 32 (sB, sC are *×SG_BN)
-    var origin = _SG_V2(0, 0)
+    var nkt = ceildiv(K, _MMA8)
+    for ks in range(nkt):
+        var kk = ks * _MMA8
+        var ktail = (kk + _MMA8 > K)           # final K-block is partial
+        # A (X) is f32 [M,K] row-major: lane's 2 frag elems are consecutive K
+        # cols kk+fcol, kk+fcol+1. K bound only on the partial tail block.
+        var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](uninitialized=True)
+        for mi in range(_SG_NTM):
+            var grow = row_base + mi * _MMA8 + frow
+            if (interior or grow < M) and not ktail:
+                afrag[mi] = (xp + grow * K + kk + fcol).load[width=_FRAG8]()
+            else:
+                var af = SIMD[DType.float32, _FRAG8](0)
+                if interior or grow < M:
+                    for s in range(_FRAG8):
+                        if kk + fcol + s < K:
+                            af[s] = xp[grow * K + kk + fcol + s]
+                afrag[mi] = af
+        # B (W) is bf16 [N,K] (transpose_b): B[k_idx, j] = bf16(W[j, k_idx]).
+        # frag slots differ in j (col); row is kk+frow (K bound only on the tail).
+        var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](uninitialized=True)
+        for ni in range(_SG_NTN):
+            var bf = SIMD[DType.float32, _FRAG8](0)
+            if not ktail or kk + frow < K:
+                for s in range(_FRAG8):
+                    var gj = col_base + ni * _MMA8 + fcol + s
+                    if interior or gj < N:
+                        bf[s] = bf16_widen(wp[gj * K + kk + frow])
+            bfrag[ni] = bf
+        for mi in range(_SG_NTM):
+            for ni in range(_SG_NTN):
+                acc[mi * _SG_NTN + ni] = _mma8x8(
+                    afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
+                )
 
-    var acc = InlineArray[_SG_FRAG, SG_NCT](fill=_SG_FRAG(0.0))
-
-    var kt = 0
-    while kt < K:
-        # stage X block (SG_BM×8) → sA[r*8+c]
-        for j in range(SG_BM * 8 // SG_TPB):
-            var c = Int(tid) + SG_TPB * j
-            var r = c // 8
-            var col = c % 8
-            var mm = m0 + r
-            var kk = kt + col
-            var xv = Float32(0.0)
-            if mm < M and kk < K:
-                xv = rebind[Scalar[DType.float32]](X[mm * K + kk])
-            sA[c] = xv
-        # stage W block transposed+widened → sB[k*SG_BN+n] = bf16(W[n0+n, kt+k])
-        for j in range(8 * SG_BN // SG_TPB):
-            var c = Int(tid) + SG_TPB * j
-            var kr = c // SG_BN
-            var nl = c % SG_BN
-            var nn = n0 + nl
-            var kk = kt + kr
-            var wv = Float32(0.0)
-            if nn < N and kk < K:
-                wv = bf16_widen(rebind[Scalar[DType.uint16]](W[nn * K + kk]))
-            sB[c] = wv
-        barrier()
-
-        var fa = external_call[_SG_LD, _SG_FRAG](sA + sg * 8 * 8, dims, lay8, origin)
-        for ct in range(SG_NCT):
-            var fb = external_call[_SG_LD, _SG_FRAG](sB + ct * 8, dims, layN, origin)
-            acc[ct] = external_call[_SG_MAC, _SG_FRAG](fa, fb, acc[ct])
-        barrier()
-        kt += 8
-
-    for ct in range(SG_NCT):
-        external_call[_SG_ST, NoneType](acc[ct], sC + sg * 8 * SG_BN + ct * 8, dims, layN, origin)
-    barrier()
-
-    # copy sC (SG_BM×SG_BN) → Y with bias + boundary mask
-    for j in range(SG_BM * SG_BN // SG_TPB):
-        var c = Int(tid) + SG_TPB * j
-        var r = c // SG_BN
-        var nl = c % SG_BN
-        var mm = m0 + r
-        var nn = n0 + nl
-        if mm < M and nn < N:
-            var v = sC[c]
-            if use_bias != 0:
-                v += rebind[Scalar[DType.float32]](B[nn])
-            Y[mm * N + nn] = rebind[Y.ElementType](v)
+    for mi in range(_SG_NTM):
+        for ni in range(_SG_NTN):
+            var frag = acc[mi * _SG_NTN + ni]
+            for s in range(_FRAG8):
+                var grow = row_base + mi * _MMA8 + frow
+                var gcol = col_base + ni * _MMA8 + fcol + s
+                if grow < M and gcol < N:
+                    var v = frag[s]
+                    if use_bias != 0:
+                        v += rebind[Scalar[DType.float32]](B[gcol])
+                    Y[grow * N + gcol] = rebind[Y.ElementType](v)
 
 
 # ── group-128 int4 weights (opt-in, e.g. for the 3B) ──────────────────────────
@@ -535,69 +561,69 @@ def matmul_simd_q4_kernel[
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
 ):
-    """int4 prefill GEMM: matmul_simd_kernel with int4-dequant W-staging. The
-    simdgroup-matrix math is byte-for-byte the bf16 kernel's — only sB is filled
-    from q4_deq instead of bf16_widen — so the ~4.5× prefill speedup carries."""
+    """int4 prefill GEMM: matmul_simd_kernel with int4-dequant W reads. The
+    compact 8×8 simdgroup-matrix math is byte-for-byte the bf16 kernel's — only
+    the B fragment is filled from q4_deq instead of bf16_widen — so the ~2×
+    register-blocked speedup carries."""
     comptime assert X.flat_rank == 1
-    var tid = thread_idx.x
-    var sg = Int(tid) // 32
-    var m0 = Int(block_idx.y) * SG_BM
-    var n0 = Int(block_idx.x) * SG_BN
+    var lane = Int(thread_idx.x) % 32
+    var fl = _frag8_layout(lane)
+    var frow = fl[0]
+    var fcol = fl[1]
+    var sg = Int(thread_idx.x) // 32
+    var row_base = Int(block_idx.y) * SG_BM + (sg // 2) * _SG_SGM
+    var col_base = Int(block_idx.x) * SG_BN + (sg % 2) * _SG_SGN
+    var interior = (row_base + _SG_SGM <= M) and (col_base + _SG_SGN <= N)
 
-    var sA = stack_allocation[SG_BM * 8, Float32, address_space = AddressSpace.SHARED]()
-    var sB = stack_allocation[8 * SG_BN, Float32, address_space = AddressSpace.SHARED]()
-    var sC = stack_allocation[SG_BM * SG_BN, Float32, address_space = AddressSpace.SHARED]()
+    var xp = X.ptr
+    var acc = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM * _SG_NTN](
+        fill=SIMD[DType.float32, _FRAG8](0)
+    )
 
-    var dims = _SG_V2(8, 8)
-    var lay8 = _SG_V2(1, 8)
-    var layN = _SG_V2(1, SG_BN)
-    var origin = _SG_V2(0, 0)
-    var acc = InlineArray[_SG_FRAG, SG_NCT](fill=_SG_FRAG(0.0))
+    var nkt = ceildiv(K, _MMA8)
+    for ks in range(nkt):
+        var kk = ks * _MMA8
+        var ktail = (kk + _MMA8 > K)
+        var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](uninitialized=True)
+        for mi in range(_SG_NTM):
+            var grow = row_base + mi * _MMA8 + frow
+            if (interior or grow < M) and not ktail:
+                afrag[mi] = (xp + grow * K + kk + fcol).load[width=_FRAG8]()
+            else:
+                var af = SIMD[DType.float32, _FRAG8](0)
+                if interior or grow < M:
+                    for s in range(_FRAG8):
+                        if kk + fcol + s < K:
+                            af[s] = xp[grow * K + kk + fcol + s]
+                afrag[mi] = af
+        # B (W) is int4 [N,K] (transpose_b): B[k_idx, j] = deq(W[j, k_idx]).
+        var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](uninitialized=True)
+        for ni in range(_SG_NTN):
+            var bf = SIMD[DType.float32, _FRAG8](0)
+            var krow = kk + frow
+            if not ktail or krow < K:
+                for s in range(_FRAG8):
+                    var gj = col_base + ni * _MMA8 + fcol + s
+                    if interior or gj < N:
+                        bf[s] = q4_deq(P, S, gj, krow, K, NG)
+            bfrag[ni] = bf
+        for mi in range(_SG_NTM):
+            for ni in range(_SG_NTN):
+                acc[mi * _SG_NTN + ni] = _mma8x8(
+                    afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
+                )
 
-    var kt = 0
-    while kt < K:
-        for j in range(SG_BM * 8 // SG_TPB):
-            var c = Int(tid) + SG_TPB * j
-            var r = c // 8
-            var col = c % 8
-            var mm = m0 + r
-            var kk = kt + col
-            var xv = Float32(0.0)
-            if mm < M and kk < K:
-                xv = rebind[Scalar[DType.float32]](X[mm * K + kk])
-            sA[c] = xv
-        for j in range(8 * SG_BN // SG_TPB):
-            var c = Int(tid) + SG_TPB * j
-            var kr = c // SG_BN
-            var nl = c % SG_BN
-            var nn = n0 + nl
-            var kk = kt + kr
-            var wv = Float32(0.0)
-            if nn < N and kk < K:
-                wv = q4_deq(P, S, nn, kk, K, NG)
-            sB[c] = wv
-        barrier()
-        var fa = external_call[_SG_LD, _SG_FRAG](sA + sg * 8 * 8, dims, lay8, origin)
-        for ct in range(SG_NCT):
-            var fb = external_call[_SG_LD, _SG_FRAG](sB + ct * 8, dims, layN, origin)
-            acc[ct] = external_call[_SG_MAC, _SG_FRAG](fa, fb, acc[ct])
-        barrier()
-        kt += 8
-
-    for ct in range(SG_NCT):
-        external_call[_SG_ST, NoneType](acc[ct], sC + sg * 8 * SG_BN + ct * 8, dims, layN, origin)
-    barrier()
-    for j in range(SG_BM * SG_BN // SG_TPB):
-        var c = Int(tid) + SG_TPB * j
-        var r = c // SG_BN
-        var nl = c % SG_BN
-        var mm = m0 + r
-        var nn = n0 + nl
-        if mm < M and nn < N:
-            var v = sC[c]
-            if use_bias != 0:
-                v += rebind[Scalar[DType.float32]](B[nn])
-            Y[mm * N + nn] = rebind[Y.ElementType](v)
+    for mi in range(_SG_NTM):
+        for ni in range(_SG_NTN):
+            var frag = acc[mi * _SG_NTN + ni]
+            for s in range(_FRAG8):
+                var grow = row_base + mi * _MMA8 + frow
+                var gcol = col_base + ni * _MMA8 + fcol + s
+                if grow < M and gcol < N:
+                    var v = frag[s]
+                    if use_bias != 0:
+                        v += rebind[Scalar[DType.float32]](B[gcol])
+                    Y[grow * N + gcol] = rebind[Y.ElementType](v)
 
 
 def silu_mul_kernel[
