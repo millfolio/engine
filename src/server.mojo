@@ -63,6 +63,10 @@ comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"
 # and is what /v1/models and every response report.
 comptime MODEL_05B = "Qwen/Qwen2.5-0.5B-Instruct"
 comptime MODEL_3B = "Qwen/Qwen2.5-3B-Instruct"
+# Default SECONDARY embedding model (arch==2). Resolved from the HF cache when no
+# $EMBED_SAFETENSORS / config `embed_model` is given; if it isn't cached either,
+# the embedding endpoint stays unloaded (/v1/embeddings → 503).
+comptime MODEL_EMBED = "Qwen/Qwen3-Embedding-0.6B"
 comptime PORT = 8000
 # Engine version, reported by GET /v1/version (used by the Millrace menu app to
 # detect a running engine and show its version). Bump on releases. Placeholder
@@ -91,8 +95,14 @@ comptime MSG_ID = "msg_millrace"
 
 
 struct ServerState(Movable):
-    """The one model, loaded once and reached by the (borrowed-self) handler
-    through a pointer so generation can still take `mut w`."""
+    """The primary (chat) model, loaded once and reached by the (borrowed-self)
+    handler through a pointer so generation can still take `mut w`.
+
+    Optionally also carries a SECONDARY embedding model (`embed_w` / `embed_tok`)
+    so one process/port serves both /v1/chat/completions and /v1/embeddings. The
+    embedding path (sess_embed) needs no KV-cache Session, so none is stored for
+    it. When the PRIMARY model is itself the embedding arch (arch==2), the embed
+    fields stay unset and /v1/embeddings falls back to the primary w/tok."""
 
     var ctx: DeviceContext
     var w: Weights
@@ -102,10 +112,17 @@ struct ServerState(Movable):
     var cached: List[Int]  # token ids currently held in sess rows [0, len)
     var model_id: String   # id reported by /v1/models + every response
     var bcache: BlockCache # disk-backed prefix cache (survives restarts)
+    # Secondary embedding model (None when the primary is itself arch==2, or when
+    # no embedding checkpoint could be resolved at startup).
+    var embed_w: Optional[Weights]
+    var embed_tok: Optional[Tokenizer]
+    var embed_id: String   # id reported for the embedding model ("" if unset)
 
     def __init__(out self, var ctx: DeviceContext, var w: Weights,
                  var tok: Tokenizer, var tmpl: Template, var sess: Session,
-                 var model_id: String, var bcache: BlockCache):
+                 var model_id: String, var bcache: BlockCache,
+                 var embed_w: Optional[Weights], var embed_tok: Optional[Tokenizer],
+                 var embed_id: String):
         self.ctx = ctx^
         self.w = w^
         self.tok = tok^
@@ -114,6 +131,9 @@ struct ServerState(Movable):
         self.cached = List[Int]()
         self.model_id = model_id^
         self.bcache = bcache^
+        self.embed_w = embed_w^
+        self.embed_tok = embed_tok^
+        self.embed_id = embed_id^
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
@@ -333,11 +353,26 @@ def gen_full(mut s: ServerState, ids: List[Int], max_new: Int,
 # ── JSON envelopes ───────────────────────────────────────────────────────────
 
 
-def models_json(model: String) -> String:
-    return (
-        '{"object":"list","data":[{"id":"' + model
-        + '","object":"model","created":0,"owned_by":"millrace"}]}'
-    )
+def service_unavailable(msg: String) -> Response:
+    """503 with a JSON error body (flare has no built-in 503 helper)."""
+    var resp = Response(status=Status.SERVICE_UNAVAILABLE, reason="Service Unavailable",
+                        body=to_bytes(msg))
+    try:
+        resp.headers.set("Content-Type", "application/json")
+    except:
+        pass
+    return resp^
+
+def _model_obj(id: String) -> String:
+    return ('{"id":"' + id + '","object":"model","created":0,"owned_by":"millrace"}')
+
+def models_json(model: String, embed_model: String) -> String:
+    """List the chat model, plus the embedding model when one is loaded
+    (embed_model == "" means none)."""
+    var data = _model_obj(model)
+    if embed_model.byte_length() > 0 and embed_model != model:
+        data += "," + _model_obj(embed_model)
+    return '{"object":"list","data":[' + data + "]}"
 
 def version_json(model: String) -> String:
     return (
@@ -528,7 +563,7 @@ struct Api(Handler, Copyable, Movable):
         if path == "/" or path == "/health":
             return ok("millrace ok")
         if path == "/v1/models":
-            return ok_json(models_json(self.st[].model_id))
+            return ok_json(models_json(self.st[].model_id, self.st[].embed_id))
         if path == "/v1/version":
             return ok_json(version_json(self.st[].model_id))
         if is_post and path == "/v1/chat/completions":
@@ -540,14 +575,21 @@ struct Api(Handler, Copyable, Movable):
         return not_found("no route for " + req.method + " " + path)
 
     def handle_embeddings(self, req: Request) raises -> Response:
-        """OpenAI /v1/embeddings. Only the Qwen3-Embedding arch (arch==2) embeds;
-        for a chat model we 400. `input` is a string or an array of strings. Each
-        is tokenized (NO EOS append — last-token pooling uses the raw final token)
-        and run through sess_embed (last-token-pooled + L2-normalized vector)."""
+        """OpenAI /v1/embeddings. Routed to the SECONDARY embedding model
+        (`embed_w`/`embed_tok`) when one is loaded; if the PRIMARY model is itself
+        the embedding arch (arch==2) we use it directly; otherwise no embedding
+        model is available → 503. `input` is a string or an array of strings. Each
+        is tokenized with the embedding model's own tokenizer (NO EOS append —
+        last-token pooling uses the raw final token) and run through sess_embed
+        (last-token-pooled + L2-normalized vector)."""
         ref s = self.st[]
-        if s.w.arch != 2:
-            return bad_request('{"error":{"message":"the served model is not an '
-                + 'embedding model (load Qwen3-Embedding-0.6B to use /v1/embeddings)"}}')
+        # Which weights+tokenizer serve embeddings: the secondary embed model if
+        # loaded, else the primary iff it is itself arch==2, else none → 503.
+        var use_secondary = Bool(s.embed_w)
+        if not use_secondary and s.w.arch != 2:
+            return service_unavailable('{"error":{"message":"no embedding model '
+                + 'loaded (set EMBED_SAFETENSORS or cache Qwen/Qwen3-Embedding-0.6B, '
+                + 'or serve an arch==2 model)"}}')
         var bv = parse_json(req.text())
         var inp = bv.map_get("input")
         if not inp:
@@ -571,21 +613,38 @@ struct Api(Handler, Copyable, Movable):
         if len(texts) == 0:
             return bad_request('{"error":{"message":"embeddings: empty input"}}')
 
+        # Tokenize every input up-front with the EMBEDDING model's own tokenizer
+        # (NO EOS append). Done before the embed loop so we don't bind a `ref` to
+        # the model weights across the two cases (secondary vs primary-arch==2),
+        # whose origins differ. The embed forward then runs per branch below.
+        var id_lists = List[List[Int]]()
         var n_tok = 0
-        var data = String("[")
         for i in range(len(texts)):
-            var ids = s.tok.encode(to_bytes(texts[i]))   # no EOS append
+            var ids: List[Int]
+            if use_secondary:
+                ids = s.embed_tok.value().encode(to_bytes(texts[i]))
+            else:
+                ids = s.tok.encode(to_bytes(texts[i]))
             if len(ids) == 0:
                 return bad_request('{"error":{"message":"embeddings: input '
                     + String(i) + ' tokenized to zero tokens"}}')
             n_tok += len(ids)
-            var vec = sess_embed(s.ctx, s.w, ids)
+            id_lists.append(ids^)
+
+        var data = String("[")
+        for i in range(len(id_lists)):
+            var vec: List[Float32]
+            if use_secondary:
+                vec = sess_embed(s.ctx, s.embed_w.value(), id_lists[i])
+            else:
+                vec = sess_embed(s.ctx, s.w, id_lists[i])
             if i > 0:
                 data += ","
-            data += embedding_item_json(i, vec)
+            data += embedding_item_json(i, vec^)
         data += "]"
+        var emb_id = s.embed_id if use_secondary else s.model_id
         print("  embeddings: ", len(texts), " input(s), ", n_tok, " tokens", sep="")
-        return ok_json(embeddings_json(s.model_id, data, n_tok))
+        return ok_json(embeddings_json(emb_id, data, n_tok))
 
     def handle_chat(self, req: Request) raises -> Response:
         ref s = self.st[]
@@ -766,13 +825,16 @@ struct Config(Copyable, Movable):
     """Server config from ~/.config/millrace/config.json (+ env). All keys optional;
     precedence is: env var > config file > built-in default."""
     var port: Int
-    var model: String       # default model/checkpoint (when no CLI arg / $QWEN_SAFETENSORS)
+    var model: String       # default chat model/checkpoint (when no CLI arg / $QWEN_SAFETENSORS)
+    var embed_model: String # default embedding model/checkpoint (when no $EMBED_SAFETENSORS)
     var q4: Bool            # group-128 int4 projection weights
     var kv_budget_mb: Int   # disk KV-cache LRU cap, in MiB
 
-    def __init__(out self, port: Int, var model: String, q4: Bool, kv_budget_mb: Int):
+    def __init__(out self, port: Int, var model: String, var embed_model: String,
+                 q4: Bool, kv_budget_mb: Int):
         self.port = port
         self.model = model^
+        self.embed_model = embed_model^
         self.q4 = q4
         self.kv_budget_mb = kv_budget_mb
 
@@ -791,10 +853,13 @@ def _config_atoi(s: String, default: Int) -> Int:
 
 def load_config() -> Config:
     """Load ~/.config/millrace/config.json (override path: $MILLRACE_CONFIG).
-    Recognized keys: port (int), model (str), q4 (bool), kv_budget_mb (int, MiB).
-    Parsed with the same jinja2.mojo json the server already uses for requests."""
+    Recognized keys: port (int), model (str), embed_model (str), q4 (bool),
+    kv_budget_mb (int, MiB). `model` is the chat model; `embed_model` is the
+    secondary embedding model (HF id or checkpoint path, same treatment as
+    `model`). Parsed with the same jinja2.mojo json the server uses for requests."""
     var port = Int(PORT)
     var model = String("")
+    var embed_model = String("")
     var q4 = False
     var kv_mb = Int(KV_BUDGET_BYTES) // (1024 * 1024)   # default 8 GiB -> 8192 MiB
 
@@ -807,6 +872,9 @@ def load_config() -> Config:
         var m = get_str(v, "model")
         if m.byte_length() > 0:
             model = m^
+        var em = get_str(v, "embed_model")
+        if em.byte_length() > 0:
+            embed_model = em^
         q4 = get_bool(v, "q4", q4)
         kv_mb = get_int(v, "kv_budget_mb", kv_mb)
     except:
@@ -818,7 +886,7 @@ def load_config() -> Config:
         port = _config_atoi(ep, port)
     if String(getenv("QWEN_Q4")) == "1":
         q4 = True
-    return Config(port, model^, q4, kv_mb)
+    return Config(port, model^, embed_model^, q4, kv_mb)
 
 
 def main() raises:
@@ -900,7 +968,69 @@ def main() raises:
     else:
         print("  kv-cache: disabled")
 
-    var state = ServerState(ctx^, w^, tok^, tmpl^, sess^, model_id^, bcache^)
+    # SECONDARY embedding model so one process/port serves /v1/embeddings too.
+    # Checkpoint precedence (mirrors the chat model's id->snapshot resolution):
+    #   $EMBED_SAFETENSORS (path) > config `embed_model` (HF id or path) >
+    #   default Qwen/Qwen3-Embedding-0.6B from the HF cache. If none resolves the
+    #   field stays unset and /v1/embeddings 503s (chat still works). Skipped when
+    #   the PRIMARY is itself the embedding arch (arch==2) — it serves embeddings.
+    var embed_w = Optional[Weights](None)
+    var embed_tok = Optional[Tokenizer](None)
+    var embed_id = String("")
+    if w.arch == 2:
+        print("  embeddings: served by the primary model (arch==2)")
+    else:
+        var eckpt = String("")
+        var eid = String("")
+        var esrc = String("")
+        var eenv = String(getenv("EMBED_SAFETENSORS"))
+        if eenv.byte_length() > 0:
+            eckpt = eenv; esrc = "EMBED_SAFETENSORS"   # literal path
+        elif cfg.embed_model.byte_length() > 0:
+            try:
+                eckpt = hf_cache_path(cfg.embed_model); eid = cfg.embed_model.copy()
+                esrc = "config embed_model"
+            except:
+                eckpt = cfg.embed_model.copy(); eid = cfg.embed_model.copy()
+                esrc = "config embed_model (path)"
+        else:
+            try:
+                eckpt = hf_cache_path(MODEL_EMBED); eid = String(MODEL_EMBED)
+                esrc = "default (HF cache)"
+            except:
+                pass  # not cached either -> embed model stays unset
+        if eckpt.byte_length() > 0:
+            try:
+                var edir = eckpt if isdir(eckpt) else _dirname(eckpt)
+                var etok_json = edir + "/tokenizer.json"
+                var et: Tokenizer
+                if exists(etok_json):
+                    et = load_tokenizer_json(etok_json)
+                else:
+                    et = load_tokenizer("tests/fixtures/tokenizer/")
+                var ew = load_weights(ctx, eckpt, False)   # embed weights stay bf16
+                ew.simd_ok = w.simd_ok
+                if eid.byte_length() == 0:
+                    eid = String(MODEL_EMBED)
+                embed_id = eid.copy()
+                print("  embed model: ", embed_id, "  (dims=", ew.hidden,
+                      ", layers=", ew.nlayers, ", arch=", ew.arch, ", ", esrc,
+                      ")", sep="")
+                embed_tok = Optional[Tokenizer](et^)
+                embed_w = Optional[Weights](ew^)
+            except:
+                print("  embed model: failed to load ", eckpt, " (", esrc,
+                      ") — /v1/embeddings will 503", sep="")
+        else:
+            print("  embed model: none resolved — /v1/embeddings will 503")
+
+    # Capture the banner values before the (moving) ServerState construction.
+    var banner_embed_id = embed_id.copy()
+    var banner_model_id = model_id.copy()
+    var primary_is_embed = w.arch == 2
+
+    var state = ServerState(ctx^, w^, tok^, tmpl^, sess^, model_id^, bcache^,
+                            embed_w^, embed_tok^, embed_id^)
     var sp = alloc[ServerState](1)
     sp.init_pointee_move(state^)
     var api = Api(sp)
@@ -910,6 +1040,11 @@ def main() raises:
     print("  GET  /v1/version")
     print("  POST /v1/chat/completions  (stream + non-stream)")
     print("  POST /v1/responses         (stream + non-stream)")
-    print("  POST /v1/embeddings        (Qwen3-Embedding only)")
+    if banner_embed_id.byte_length() > 0:
+        print("  POST /v1/embeddings        (", banner_embed_id, ")", sep="")
+    elif primary_is_embed:
+        print("  POST /v1/embeddings        (", banner_model_id, ")", sep="")
+    else:
+        print("  POST /v1/embeddings        (no embed model — 503)")
     var srv = HttpServer.bind(SocketAddr.localhost(UInt16(cfg.port)))
     srv.serve(api^)

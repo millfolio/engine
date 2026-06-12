@@ -1,6 +1,7 @@
 {
   "port": 8000,
   "model": "Qwen/Qwen2.5-3B-Instruct",
+  "embed_model": "Qwen/Qwen3-Embedding-0.6B",
   "q4": false,
   "kv_budget_mb": 8192
 }

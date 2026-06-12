@@ -111,9 +111,16 @@ All keys are optional — see [`config.example.json`](config.example.json):
 | key | default | notes / env override |
 |---|---|---|
 | `port` | `8000` | `MILLRACE_PORT` |
-| `model` | (meta.txt fixture) | HF id or checkpoint path; below CLI arg + `$QWEN_SAFETENSORS` |
+| `model` | (meta.txt fixture) | chat model — HF id or checkpoint path; below CLI arg + `$QWEN_SAFETENSORS` |
+| `embed_model` | `Qwen/Qwen3-Embedding-0.6B` (from HF cache) | embedding model for `/v1/embeddings` — HF id or checkpoint path; `EMBED_SAFETENSORS` |
 | `q4` | `false` | group-128 int4 projection weights; `QWEN_Q4=1` |
 | `kv_budget_mb` | `8192` (8 GiB) | disk KV-cache LRU cap, in MiB |
+
+The `embed_model` is a **secondary** model loaded alongside `model`, so one
+process/port serves both `/v1/chat/completions` (the chat model) and
+`/v1/embeddings` (the embedding model). If no embedding checkpoint resolves
+(`$EMBED_SAFETENSORS` → `embed_model` → the default from the HF cache),
+`/v1/embeddings` returns 503 and chat still works.
 
 **Precedence: env / CLI arg > config file > built-in default.** So
 `pixi run serve <model>` and the existing env vars still take priority; the file
