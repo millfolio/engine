@@ -9,7 +9,7 @@ Hardcoded to Qwen2.5-0.5B (ARCHITECTURE.md §2): 14 query heads, 2 kv heads,
 head_dim 64, RoPE θ=1e6, RMSNorm ε=1e-6.
 """
 
-from std.math import sqrt, exp, log, cos, sin, ceildiv
+from std.math import sqrt, exp, log, cos, sin, tanh, ceildiv
 from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
 from std.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum, max as warp_max, shuffle_xor
@@ -899,6 +899,49 @@ def silu_mul_cat_kernel[
     var g = rebind[Scalar[DType.float32]](GU[t * 2 * inter + i])
     var u = rebind[Scalar[DType.float32]](GU[t * 2 * inter + i + inter])
     Y[idx] = rebind[Y.ElementType]((g / (1.0 + exp(-g))) * u)
+
+
+comptime _GELU_C = Float32(0.7978845608028654)   # √(2/π), for the tanh GELU approx
+
+
+def gelu_mul_cat_kernel[
+    LT: TensorLayout
+](
+    GU: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, 2*inter]: gate(inter) ++ up(inter)
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],    # [T, inter]
+    T: Int,
+    inter: Int,
+):
+    """GeGLU activation (Gemma): Y = gelu_tanh(gate)·up, reading the fused gate+up
+    GEMV output — the GELU sibling of silu_mul_cat_kernel. `gelu_pytorch_tanh`:
+    0.5·g·(1 + tanh(√(2/π)·(g + 0.044715·g³)))."""
+    comptime assert GU.flat_rank == 1
+    var idx = global_idx.x
+    if idx >= T * inter:
+        return
+    var t = idx // inter
+    var i = idx % inter
+    var g = rebind[Scalar[DType.float32]](GU[t * 2 * inter + i])
+    var u = rebind[Scalar[DType.float32]](GU[t * 2 * inter + i + inter])
+    var gelu = 0.5 * g * (1.0 + tanh(_GELU_C * (g + 0.044715 * g * g * g)))
+    Y[idx] = rebind[Y.ElementType](gelu * u)
+
+
+def softcap_kernel[
+    LT: TensorLayout
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],   # in-place: X ← cap·tanh(X/cap)
+    n: Int,
+    cap: Float32,
+):
+    """Logit soft-capping (Gemma): X ← cap·tanh(X/cap), in place. Used for the
+    final-logit softcap (cap=30) and reusable for the attention-logit softcap."""
+    comptime assert X.flat_rank == 1
+    var i = global_idx.x
+    if i >= n:
+        return
+    var v = rebind[Scalar[DType.float32]](X[i])
+    X[i] = rebind[X.ElementType](cap * tanh(v / cap))
 
 
 def copy_kernel[

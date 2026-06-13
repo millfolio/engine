@@ -17,6 +17,7 @@ from kernels import (
     matmul_norm_kernel, matmul_q4_norm_kernel,
     matmul_silu_resid_kernel, matmul_q4_silu_resid_kernel,
     rmsnorm_kernel, add_kernel, silu_mul_kernel, silu_mul_cat_kernel,
+    gelu_mul_cat_kernel, softcap_kernel,
     embed_kernel, slice_row_kernel, copy_kernel, copy_strided_kernel,
     SG_BM, SG_BN, SG_TPB, Q4_GROUP,
 )
@@ -325,6 +326,23 @@ def silu_mul_cat(ctx: DeviceContext, mut gu: DevBuf, T: Int, inter: Int) raises 
         grid_dim=ceildiv(T * inter, BLOCK), block_dim=BLOCK,
     )
     return y^
+
+def gelu_mul_cat(ctx: DeviceContext, mut gu: DevBuf, T: Int, inter: Int) raises -> DevBuf:
+    """GeGLU on the fused gate+up GEMV output [T, 2*inter] → [T, inter] (Gemma)."""
+    var y = ctx.enqueue_create_buffer[DType.float32](T * inter)
+    var lay = row_major(T * inter)
+    comptime k = gelu_mul_cat_kernel[type_of(lay)]
+    ctx.enqueue_function[k](
+        TileTensor(gu, row_major(T * 2 * inter)), TileTensor(y, lay), T, inter,
+        grid_dim=ceildiv(T * inter, BLOCK), block_dim=BLOCK,
+    )
+    return y^
+
+def softcap(ctx: DeviceContext, mut x: DevBuf, n: Int, cap: Float32) raises:
+    """In-place logit soft-capping x ← cap·tanh(x/cap) (Gemma)."""
+    var lay = row_major(n)
+    comptime k = softcap_kernel[type_of(lay)]
+    ctx.enqueue_function[k](TileTensor(x, lay), n, cap, grid_dim=ceildiv(n, BLOCK), block_dim=BLOCK)
 
 def embed_tokens(ctx: DeviceContext, mut ids: DeviceBuffer[DType.int32], mut emb: WBuf, T: Int,
                  hidden: Int, vocab: Int) raises -> DevBuf:
