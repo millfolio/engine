@@ -111,6 +111,10 @@ int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.m
 # KV session -> prefill/decode -> detokenize), the exact stack server.gen_full
 # drives. Loads the ~7 GB int4 model (needs the gemma-4-12B checkpoint cached).
 gemma-serve-smoke = { cmd = "mkdir -p build && mojo build tests/manual/gemma_serve_smoke.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/gemma_serve_smoke && ./build/gemma_serve_smoke" }
+# Gemma chat-template render vs transformers (thinking + tool defs), CPU-only —
+# no weights/GPU. Validates assets/gemma4-chat-template.jinja + gemma_tools.mojo
+# against tests/fixtures/gemma/chat_cases.json.
+gemma-template-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_template_test.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/gemma_template_test && ./build/gemma_template_test" }
 
 # Cross-engine benchmark (millrace vs mlx_lm.server vs Ollama): TTFT, decode
 # tok/s, cold/warm prefix. Stdlib python, no GPU build. Start the servers first

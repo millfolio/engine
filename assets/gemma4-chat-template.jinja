@@ -1,15 +1,38 @@
-{#- Gemma 4 chat template — core text-chat path (millrace).
+{#- Gemma 4 chat template (millrace) — a faithful subset of the upstream
+    gemma4_unified chat_template.jinja for the served paths: system/developer +
+    user/assistant turns, the thinking channel, and tool DEFINITIONS.
 
-    A faithful subset of the upstream gemma4_unified chat_template.jinja, covering
-    the text-only chat path: system/developer + user/assistant turns and the
-    non-thinking generation prompt. Byte-identical to transformers'
-    apply_chat_template for these messages. Tools, the thinking channel, and
-    multimodal parts are intentionally omitted (not served yet); add them here when
-    the engine grows those paths. `<bos>` is hardcoded (Gemma-specific) so no
-    bos_token needs threading through the render context. -#}
+    Byte-identical to transformers' apply_chat_template for these inputs. Two
+    context vars are supplied by chat.render_value (Gemma family) and MUST be
+    defined (jinja2.mojo raises on undefined access):
+      enable_thinking    — bool; injects <|think|> + uses the thinking gen prompt
+      gemma_tools_block  — pre-rendered <|tool>…<tool|> block ('' when no tools),
+                           built in Mojo (jinja2.mojo has no macros for it)
+
+    Intentionally omitted (further increments, none served yet): assistant
+    tool_calls + tool-response messages in history, multimodal parts, and
+    strip_thinking of past assistant content (a no-op for marker-free content,
+    which is what an OpenAI client sends back). `<bos>` is hardcoded. -#}
 {{- '<bos>' -}}
+{%- set has_tools = gemma_tools_block != '' -%}
+{%- set first_is_system = messages[0]['role'] == 'system' or messages[0]['role'] == 'developer' -%}
+{%- if enable_thinking or has_tools or first_is_system -%}
+    {{- '<|turn>system\n' -}}
+    {%- if enable_thinking -%}
+        {{- '<|think|>\n' -}}
+    {%- endif -%}
+    {%- if first_is_system -%}
+        {{- messages[0]['content'] | trim -}}
+    {%- endif -%}
+    {%- if has_tools -%}
+        {{- gemma_tools_block -}}
+    {%- endif -%}
+    {{- '<turn|>\n' -}}
+{%- endif -%}
 {%- for message in messages -%}
-    {%- if message['role'] == 'assistant' -%}
+    {%- if loop.index0 == 0 and first_is_system -%}
+        {#- already emitted inside the system block above -#}
+    {%- elif message['role'] == 'assistant' -%}
         {{- '<|turn>model\n' + (message['content'] | trim) + '<turn|>\n' -}}
     {%- elif message['role'] == 'system' or message['role'] == 'developer' -%}
         {{- '<|turn>system\n' + (message['content'] | trim) + '<turn|>\n' -}}
@@ -18,5 +41,8 @@
     {%- endif -%}
 {%- endfor -%}
 {%- if add_generation_prompt -%}
-    {{- '<|turn>model\n<|channel>thought\n<channel|>' -}}
+    {{- '<|turn>model\n' -}}
+    {%- if not enable_thinking -%}
+        {{- '<|channel>thought\n<channel|>' -}}
+    {%- endif -%}
 {%- endif -%}

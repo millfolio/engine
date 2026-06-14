@@ -1,0 +1,42 @@
+[
+ {
+  "name": "plain user",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]}",
+  "want": "<bos><|turn>user\nHello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+ },
+ {
+  "name": "system+user",
+  "body": "{\"messages\": [{\"role\": \"system\", \"content\": \"You are helpful.\"}, {\"role\": \"user\", \"content\": \"Hi\"}]}",
+  "want": "<bos><|turn>system\nYou are helpful.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+ },
+ {
+  "name": "multi-turn",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"2+2?\"}, {\"role\": \"assistant\", \"content\": \"4\"}, {\"role\": \"user\", \"content\": \"thanks\"}]}",
+  "want": "<bos><|turn>user\n2+2?<turn|>\n<|turn>model\n4<turn|>\n<|turn>user\nthanks<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+ },
+ {
+  "name": "thinking user",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"Hi\"}], \"enable_thinking\": true}",
+  "want": "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+ },
+ {
+  "name": "thinking system",
+  "body": "{\"messages\": [{\"role\": \"system\", \"content\": \"Be terse.\"}, {\"role\": \"user\", \"content\": \"Hi\"}], \"enable_thinking\": true}",
+  "want": "<bos><|turn>system\n<|think|>\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+ },
+ {
+  "name": "tools simple",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"weather in Paris?\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"units\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"], \"description\": \"Temperature units\"}}, \"required\": [\"city\"]}}}]}",
+  "want": "<bos><|turn>system\n<|tool>declaration:get_weather{description:<|\"|>Get weather for a city.<|\"|>,parameters:{properties:{city:{description:<|\"|>City name<|\"|>,type:<|\"|>STRING<|\"|>},units:{description:<|\"|>Temperature units<|\"|>,enum:[<|\"|>c<|\"|>,<|\"|>f<|\"|>],type:<|\"|>STRING<|\"|>}},required:[<|\"|>city<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\nweather in Paris?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+ },
+ {
+  "name": "tools complex",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"go\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"book_trip\", \"description\": \"Book a trip.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"Destination\"}, \"nights\": {\"type\": \"number\", \"description\": \"How many nights\"}, \"refundable\": {\"type\": \"boolean\", \"description\": \"Refundable?\"}, \"tags\": {\"type\": \"array\", \"description\": \"Labels\", \"items\": {\"type\": \"string\"}}, \"guest\": {\"type\": \"object\", \"description\": \"Guest\", \"properties\": {\"name\": {\"type\": \"string\", \"description\": \"Full name\"}, \"vip\": {\"type\": \"boolean\", \"description\": \"VIP\"}}, \"required\": [\"name\"]}}, \"required\": [\"city\", \"nights\"]}}}, {\"type\": \"function\", \"function\": {\"name\": \"ping\", \"description\": \"Ping.\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}}]}",
+  "want": "<bos><|turn>system\n<|tool>declaration:book_trip{description:<|\"|>Book a trip.<|\"|>,parameters:{properties:{city:{description:<|\"|>Destination<|\"|>,type:<|\"|>STRING<|\"|>},guest:{description:<|\"|>Guest<|\"|>,properties:{name:{description:<|\"|>Full name<|\"|>,type:<|\"|>STRING<|\"|>},vip:{description:<|\"|>VIP<|\"|>,type:<|\"|>BOOLEAN<|\"|>}},required:[<|\"|>name<|\"|>],type:<|\"|>OBJECT<|\"|>},nights:{description:<|\"|>How many nights<|\"|>,type:<|\"|>NUMBER<|\"|>},refundable:{description:<|\"|>Refundable?<|\"|>,type:<|\"|>BOOLEAN<|\"|>},tags:{description:<|\"|>Labels<|\"|>,items:{type:<|\"|>STRING<|\"|>},type:<|\"|>ARRAY<|\"|>}},required:[<|\"|>city<|\"|>,<|\"|>nights<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><|tool>declaration:ping{description:<|\"|>Ping.<|\"|>,parameters:{type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\ngo<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+ },
+ {
+  "name": "tools+thinking",
+  "body": "{\"messages\": [{\"role\": \"user\", \"content\": \"go\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"units\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"], \"description\": \"Temperature units\"}}, \"required\": [\"city\"]}}}], \"enable_thinking\": true}",
+  "want": "<bos><|turn>system\n<|think|>\n<|tool>declaration:get_weather{description:<|\"|>Get weather for a city.<|\"|>,parameters:{properties:{city:{description:<|\"|>City name<|\"|>,type:<|\"|>STRING<|\"|>},units:{description:<|\"|>Temperature units<|\"|>,enum:[<|\"|>c<|\"|>,<|\"|>f<|\"|>],type:<|\"|>STRING<|\"|>}},required:[<|\"|>city<|\"|>],type:<|\"|>OBJECT<|\"|>}}<tool|><turn|>\n<|turn>user\ngo<turn|>\n<|turn>model\n"
+ }
+]

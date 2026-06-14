@@ -790,7 +790,7 @@ struct Api(Handler, Copyable, Movable):
         ref s = self.st[]
         var body = req.text()
         var bv = parse_json(body)
-        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv)))
+        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.family)))
         var max_new = get_int(bv, "max_tokens", DEF_MAXNEW)
         var temp = Float32(get_float(bv, "temperature", 0.0))
         var top_p = Float32(get_float(bv, "top_p", Float64(DEF_TOPP)))
@@ -844,7 +844,7 @@ struct Api(Handler, Copyable, Movable):
         if not chat:
             return bad_request('{"error":{"message":"responses: need messages or string input"}}')
         var bv = chat.value()
-        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv)))
+        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.family)))
         # Generation knobs live on the original Responses body, not the
         # synthesized messages Value. (`max_output_tokens` is the Responses
         # spelling; fall back to `max_tokens`.)
