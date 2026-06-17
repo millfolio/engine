@@ -24,7 +24,7 @@ from safetensors import (
     load_one_bf16, load_named_bf16, load_one_q4, load_proj, fuse_pair,
     concat_bias, gather_tensors,
 )
-from model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, FAMILY_GEMMA, ACT_SILU, ACT_GELU
+from model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, FAMILY_GEMMA, ACT_SILU, ACT_GELU, TOOL_QWEN, TOOL_GEMMA
 from qwen import (
     Weights, load_weights, rope_k, rope_kv, attn_cached, sess_embed,
     qwen_layer, qwen_layer as layer_cached, EOS1, EOS2, FLASH_THRESHOLD,

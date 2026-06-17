@@ -38,7 +38,7 @@ from tensor_ops import (
 from safetensors import (
     TensorEntry, gather_tensors, load_named, load_named_bf16, load_proj, fuse_pair,
 )
-from model_iface import ModelConfig, ModelWeights, FAMILY_GEMMA, ACT_GELU
+from model_iface import ModelConfig, ModelWeights, FAMILY_GEMMA, ACT_GELU, TOOL_GEMMA
 
 # Gemma 4 12B-it dims (from text_config).
 comptime G_HIDDEN = 3840
@@ -221,7 +221,7 @@ def load_gemma_weights(ctx: DeviceContext, path: String, layers: List[Int], q4: 
     # (The per-layer test sizes its own caches.) norm_offset=0 (plain RMSNorm).
     var cfg = ModelConfig(
         FAMILY_GEMMA, G_NLAYERS, SL_NKV, False, True, ACT_GELU, 0.0, G_FINAL_SOFTCAP,
-        1024, SL_THETA, G_EMBED_SCALE, 0.0, G_EOS1, G_EOS2,
+        1024, SL_THETA, G_EMBED_SCALE, 0.0, G_EOS1, G_EOS2, TOOL_GEMMA, 50,   # 50 = <|tool_response>
     )
     return GemmaWeights(
         embed^, final_norm^, ln1^, ln_post_attn^, ln_pre_ff^, ln_post_ff^, qkv^, ow^,

@@ -33,12 +33,13 @@ from std.os.path import exists, isdir
 from flare.prelude import *
 from flare.http import Handler, SseChannel, SseEvent, sse_response
 
+from std.utils import Variant
 from model import (
     Weights, load_weights, probe_simd_gemm, EOS1, EOS2,
     Session, new_session, sess_prefill_suffix, sess_step, sess_verify,
     _ngram_draft, _argmax_row,
     argmax_f, process_logits, sample, sess_embed,
-    FAMILY_QWEN, FAMILY_GEMMA,
+    FAMILY_QWEN, FAMILY_GEMMA, ModelConfig, TOOL_GEMMA,
 )
 from tokenizer import Tokenizer, load_tokenizer, load_tokenizer_json, load_gemma_tokenizer_json
 from gemma import GemmaWeights, load_gemma_weights, G_NLAYERS
@@ -134,15 +135,14 @@ struct ServerState(Movable):
     fields stay unset and /v1/embeddings falls back to the primary w/tok."""
 
     var ctx: DeviceContext
-    # The primary (chat) model is one of two weight structs (both conform to the
-    # ModelWeights trait): Qwen in `w` or Gemma in `gw`, selected by `family`.
-    # Generation dispatches on `family`; the engine calls are already parametric.
-    var family: Int                 # FAMILY_QWEN | FAMILY_GEMMA
-    var w: Optional[Weights]        # primary when family == FAMILY_QWEN
-    var gw: Optional[GemmaWeights]  # primary when family == FAMILY_GEMMA
+    # The primary (chat) model is one of several weight structs, all conforming to
+    # the ModelWeights trait, held in a Variant (Mojo has no trait objects). Every
+    # weight-touching op dispatches once on `model.isa[…]()`; the rest of the server
+    # is family-agnostic and reads per-model behavior (eos, tool style, extra stop)
+    # from `cfg`. Adding a model = a Variant arm + a ModelConfig — no scattered ifs.
+    var model: Variant[Weights, GemmaWeights]
+    var cfg: ModelConfig            # the primary model's config (behavior flags + eos)
     var primary_arch: Int           # Qwen arch (0/1/2) for the embed gate; -1 for Gemma
-    var eos1: Int                   # primary stop tokens (from its ModelConfig)
-    var eos2: Int
     var max_seq: Int                # primary KV-cache context cap
     var tok: Tokenizer
     var tmpl: Template
@@ -156,20 +156,17 @@ struct ServerState(Movable):
     var embed_tok: Optional[Tokenizer]
     var embed_id: String   # id reported for the embedding model ("" if unset)
 
-    def __init__(out self, var ctx: DeviceContext, family: Int,
-                 var w: Optional[Weights], var gw: Optional[GemmaWeights],
-                 primary_arch: Int, eos1: Int, eos2: Int, max_seq: Int,
+    def __init__(out self, var ctx: DeviceContext,
+                 var model: Variant[Weights, GemmaWeights], cfg: ModelConfig,
+                 primary_arch: Int, max_seq: Int,
                  var tok: Tokenizer, var tmpl: Template, var sess: Session,
                  var model_id: String, var bcache: BlockCache,
                  var embed_w: Optional[Weights], var embed_tok: Optional[Tokenizer],
                  var embed_id: String):
         self.ctx = ctx^
-        self.family = family
-        self.w = w^
-        self.gw = gw^
+        self.model = model^
+        self.cfg = cfg
         self.primary_arch = primary_arch
-        self.eos1 = eos1
-        self.eos2 = eos2
         self.max_seq = max_seq
         self.tok = tok^
         self.tmpl = tmpl^
@@ -321,32 +318,32 @@ struct Reply(Movable):
         self.tps = tps
 
 
+# The three weight-touching ops, each branching ONCE on the Variant's active type
+# (the engine calls are parametric over ModelWeights). Adding a model = one arm here.
 def _prefill_suffix(mut s: ServerState, suffix: List[Int], reuse: Int) raises -> List[Float32]:
-    """Prefill `suffix` into the persistent session, dispatching to the primary's
-    weight struct (the engine call is parametric over ModelWeights)."""
-    if s.family == FAMILY_GEMMA:
-        return sess_prefill_suffix(s.ctx, s.gw.value(), s.sess, suffix, reuse, True)
-    return sess_prefill_suffix(s.ctx, s.w.value(), s.sess, suffix, reuse, True)
+    if s.model.isa[GemmaWeights]():
+        return sess_prefill_suffix(s.ctx, s.model[GemmaWeights], s.sess, suffix, reuse, True)
+    return sess_prefill_suffix(s.ctx, s.model[Weights], s.sess, suffix, reuse, True)
 
 
 def _step(mut s: ServerState, token: Int) raises -> List[Float32]:
-    """Decode one token, dispatching to the primary's weight struct."""
-    if s.family == FAMILY_GEMMA:
-        return sess_step(s.ctx, s.gw.value(), s.sess, token)
-    return sess_step(s.ctx, s.w.value(), s.sess, token)
+    if s.model.isa[GemmaWeights]():
+        return sess_step(s.ctx, s.model[GemmaWeights], s.sess, token)
+    return sess_step(s.ctx, s.model[Weights], s.sess, token)
 
 
 def _verify(mut s: ServerState, batch: List[Int]) raises -> List[Float32]:
     """Speculative batch forward: logits for ALL positions in `batch` at the
-    session's current pos (does NOT advance pos), dispatching by family."""
-    if s.family == FAMILY_GEMMA:
-        return sess_verify(s.ctx, s.gw.value(), s.sess, batch)
-    return sess_verify(s.ctx, s.w.value(), s.sess, batch)
+    session's current pos (does NOT advance pos)."""
+    if s.model.isa[GemmaWeights]():
+        return sess_verify(s.ctx, s.model[GemmaWeights], s.sess, batch)
+    return sess_verify(s.ctx, s.model[Weights], s.sess, batch)
 
 
 def _is_stop(s: ServerState, tok: Int) -> Bool:
-    """The server's stop set: model EOS pair + Gemma's tool-response marker."""
-    return tok == s.eos1 or tok == s.eos2 or (s.family == FAMILY_GEMMA and tok == GEMMA_TOOL_RESPONSE)
+    """The server's stop set: the model's EOS pair + its optional extra stop token
+    (e.g. Gemma's <|tool_response>), all carried by ModelConfig."""
+    return tok == s.cfg.eos1 or tok == s.cfg.eos2 or tok == s.cfg.extra_stop
 
 
 def gen_full(mut s: ServerState, ids: List[Int], max_new: Int,
@@ -909,7 +906,7 @@ struct Api(Handler, Copyable, Movable):
             else:
                 # Reached only when the PRIMARY is itself an embedding model
                 # (arch==2, always Qwen); Gemma never takes this branch.
-                vec = sess_embed(s.ctx, s.w.value(), id_lists[i])
+                vec = sess_embed(s.ctx, s.model[Weights], id_lists[i])
             if i > 0:
                 data += ","
             data += embedding_item_json(i, vec^)
@@ -922,7 +919,7 @@ struct Api(Handler, Copyable, Movable):
         ref s = self.st[]
         var body = req.text()
         var bv = parse_json(body)
-        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.family)))
+        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.cfg.family)))
         var max_new = get_int(bv, "max_tokens", DEF_MAXNEW)
         var temp = Float32(get_float(bv, "temperature", 0.0))
         var top_p = Float32(get_float(bv, "top_p", Float64(DEF_TOPP)))
@@ -937,7 +934,7 @@ struct Api(Handler, Copyable, Movable):
 
         # Gemma: always post-process — split off the thinking channel (surfaced as
         # `reasoning_content`) and lift any <|tool_call> blocks into `tool_calls`.
-        if s.family == FAMILY_GEMMA:
+        if s.cfg.tool_style == TOOL_GEMMA:
             var pr = parse_gemma_tool_calls(bytes_to_string(s.tok.decode(r.ids)))
             var content_e = esc(pr.content)
             var reasoning_e = esc(pr.reasoning)
@@ -1009,7 +1006,7 @@ struct Api(Handler, Copyable, Movable):
         if not chat:
             return bad_request('{"error":{"message":"responses: need messages or string input"}}')
         var bv = chat.value()
-        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.family)))
+        var ids = s.tok.encode(to_bytes(render_value(s.tmpl, bv, s.cfg.family)))
         # Generation knobs live on the original Responses body, not the
         # synthesized messages Value. (`max_output_tokens` is the Responses
         # spelling; fall back to `max_tokens`.)
@@ -1024,7 +1021,7 @@ struct Api(Handler, Copyable, Movable):
         # as a reasoning item. Qwen: the decoded text is the message verbatim.
         var reasoning_e = String("")
         var full: String
-        if s.family == FAMILY_GEMMA:
+        if s.cfg.tool_style == TOOL_GEMMA:
             var prg = parse_gemma_tool_calls(bytes_to_string(s.tok.decode(r.ids)))
             full = esc(prg.content)
             reasoning_e = esc(prg.reasoning)
@@ -1035,7 +1032,7 @@ struct Api(Handler, Copyable, Movable):
         # Tool calls -> Responses `function_call` output items (only if requested).
         if req_has_tools(bv0):
             var _completion = bytes_to_string(s.tok.decode(r.ids))
-            var tc = parse_gemma_tool_calls(_completion) if s.family == FAMILY_GEMMA else parse_tool_calls(_completion)
+            var tc = parse_gemma_tool_calls(_completion) if s.cfg.tool_style == TOOL_GEMMA else parse_tool_calls(_completion)
             if tc.has_calls():
                 print("    -> ", len(tc.calls), " tool call(s)", sep="")
                 var out_arr = function_calls_output_json(tc.calls)
@@ -1091,7 +1088,7 @@ struct Api(Handler, Copyable, Movable):
             + ',"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}'))
         # Gemma's text is cleaned post-hoc, so it can't be streamed token-incrementally
         # (the raw ids carry channel markers); send it as one delta. Qwen streams live.
-        if s.family == FAMILY_GEMMA:
+        if s.cfg.tool_style == TOOL_GEMMA:
             if full.byte_length() > 0:
                 ch.push(resp_event("response.output_text.delta",
                     '"item_id":"' + MSG_ID + '","output_index":' + String(oidx)
@@ -1304,20 +1301,18 @@ def main() raises:
     var tmpl = load_chat_template(TEMPLATE)
     var ctx = DeviceContext()
 
-    # Primary (chat) model, loaded by family. Qwen and Gemma have different weight
-    # structs (both ModelWeights); ServerState carries one in an Optional and the
-    # generation path dispatches on `family`. Capture every scalar the rest of
-    # main() + the banner need here, so the weights can move into the Optional.
-    var w_opt = Optional[Weights](None)
-    var gw_opt = Optional[GemmaWeights](None)
+    # Primary (chat) model, loaded by family into a Variant (both weight structs
+    # conform to ModelWeights). The rest of the server reads `p_cfg` for behavior +
+    # dispatches once on the Variant's active type — no per-family `if`s. Capture the
+    # scalars main()/the banner need before the weights move into the Variant.
     var p_nlayers: Int
     var p_nkv: Int
     var p_arch: Int
     var p_quant: Bool
     var p_simd_ok: Bool
-    var p_eos1: Int
-    var p_eos2: Int
     var p_maxseq: Int
+    var p_cfg: ModelConfig
+    var model: Variant[Weights, GemmaWeights]
     var gemm_path = String("simdgroup-matrix (~4.5x)")
     if family == FAMILY_GEMMA:
         # The 12B bf16 model is ~24 GB and won't fit a 24 GB GPU, so int4 is forced.
@@ -1326,25 +1321,24 @@ def main() raises:
             alllayers.append(i)
         var gw = load_gemma_weights(ctx, ckpt, alllayers, True)
         gw.simd_ok = probe_simd_gemm(ctx)
-        var gc = gw.config()
-        p_nlayers = gc.nlayers; p_nkv = gc.nkv
-        p_arch = -1; p_quant = True; p_simd_ok = gw.simd_ok
-        p_eos1 = gc.eos1; p_eos2 = gc.eos2; p_maxseq = GEMMA_MAX_SEQ
+        p_cfg = gw.config()
+        p_nlayers = p_cfg.nlayers; p_nkv = p_cfg.nkv
+        p_arch = -1; p_quant = True; p_simd_ok = gw.simd_ok; p_maxseq = GEMMA_MAX_SEQ
         if not gw.simd_ok:
             gemm_path = String("scalar tiled (simd probe failed)")
         if model_id.byte_length() == 0:
             model_id = String(MODEL_GEMMA) + "-int4"
         print("  serving ", model_id, "  (hidden=", gw.hidden, ", layers=", gw.nlayers,
               ", q-heads=", gw.hq, ", kv=8/1, head_dim=256/512, max_seq=", p_maxseq, ")", sep="")
-        gw_opt = Optional[GemmaWeights](gw^)
+        model = gw^
     else:
         var w = load_weights(ctx, ckpt, q4)
         # Probe the simdgroup-matrix GEMM once; on success prefill GEMMs take the
         # ~4.5× faster path, else fall back to the scalar tiled kernel (see mm()).
         w.simd_ok = probe_simd_gemm(ctx)
-        p_nlayers = w.nlayers; p_nkv = w.nkv
-        p_arch = w.arch; p_quant = w.quant; p_simd_ok = w.simd_ok
-        p_eos1 = EOS1; p_eos2 = EOS2; p_maxseq = MAX_SEQ
+        p_cfg = w.config()
+        p_nlayers = p_cfg.nlayers; p_nkv = p_cfg.nkv
+        p_arch = w.arch; p_quant = w.quant; p_simd_ok = w.simd_ok; p_maxseq = MAX_SEQ
         if not w.simd_ok:
             gemm_path = String("scalar tiled (simd probe failed)")
         if model_id.byte_length() == 0:   # default id from detected arch (+quant tag)
@@ -1353,7 +1347,7 @@ def main() raises:
                 model_id += "-int4"       # distinct id + KV-cache dir from the bf16 build
         print("  serving ", model_id, "  (hidden=", w.hidden, ", layers=", w.nlayers,
               ", heads=", w.hq, "/", w.hkv, ", head_dim=", w.head_dim, ")", sep="")
-        w_opt = Optional[Weights](w^)
+        model = w^
     print("  prefill GEMM: ", gemm_path, sep="")
     var wprec = String("group-128 int4 (proj) + bf16 (embed)") if p_quant else String("bf16")
     print("  weights: ", wprec, sep="")
@@ -1431,7 +1425,7 @@ def main() raises:
     var banner_model_id = model_id.copy()
     var primary_is_embed = p_arch == 2
 
-    var state = ServerState(ctx^, family, w_opt^, gw_opt^, p_arch, p_eos1, p_eos2,
+    var state = ServerState(ctx^, model^, p_cfg, p_arch,
                             p_maxseq, tok^, tmpl^, sess^, model_id^, bcache^,
                             embed_w^, embed_tok^, embed_id^)
     var sp = alloc[ServerState](1)

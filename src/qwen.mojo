@@ -30,7 +30,7 @@ from tensor_ops import (
 from safetensors import (
     TensorEntry, gather_tensors, load_named, load_named_bf16, load_proj, fuse_pair, concat_bias,
 )
-from model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, ACT_SILU, ACT_GELU
+from model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, ACT_SILU, ACT_GELU, TOOL_QWEN
 from engine import new_session, upload_ids
 
 # Qwen2.5-0.5B preset (the default when the checkpoint matches hidden==896).
@@ -231,7 +231,7 @@ def load_weights(ctx: DeviceContext, path: String, q4: Bool = False) raises -> W
     # is the reverse. All Gemma-only knobs stay off. θ/ε are shared across Qwen.
     var cfg = ModelConfig(
         FAMILY_QWEN, nlayers, nkv, arch != 2, arch == 2, ACT_SILU, 0.0, 0.0, 0,
-        1000000.0, 1.0, 0.0, EOS1, EOS2,
+        1000000.0, 1.0, 0.0, EOS1, EOS2, TOOL_QWEN, -1,
     )
     return Weights(embed^, final_norm^, ln1^, qkv^, qkv_b^, ow^, ln2^, gate_up^, down^,
                    qnorm^, knorm^, arch, nlayers, hidden, inter, nkv, hq, hkv, head_dim,

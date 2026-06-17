@@ -36,7 +36,7 @@ from tensor_ops import (
 from safetensors import (
     TensorEntry, gather_tensors, load_named, load_named_bf16, load_proj, fuse_pair,
 )
-from model_iface import ModelConfig, ModelWeights, FAMILY_GEMMA, ACT_GELU
+from model_iface import ModelConfig, ModelWeights, FAMILY_GEMMA, ACT_GELU, TOOL_GEMMA
 
 # ── e2b text dims (from text_config) ─────────────────────────────────────────
 comptime E_HIDDEN = 1536
@@ -255,7 +255,7 @@ def load_e2b_weights(ctx: DeviceContext, path: String, q4: Bool = True) raises -
 
     var cfg = ModelConfig(
         FAMILY_GEMMA, E_NLAYERS, EFU_NKV, False, True, ACT_GELU, 0.0, E_FINAL_SOFTCAP,
-        E_SLIDING_WINDOW, ESL_THETA, E_EMBED_SCALE, 0.0, E_EOS1, E_EOS2,
+        E_SLIDING_WINDOW, ESL_THETA, E_EMBED_SCALE, 0.0, E_EOS1, E_EOS2, TOOL_GEMMA, 50,
     )
     return GemmaE2bWeights(
         embed^, embed_pl^, final_norm^, ln1^, ln_post_attn^, ln_pre_ff^, ln_post_ff^,
