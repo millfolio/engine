@@ -1409,6 +1409,14 @@ def main() raises:
         p_cfg = w.config()
         p_nlayers = p_cfg.nlayers; p_nkv = p_cfg.nkv
         p_arch = w.arch; p_quant = w.quant; p_simd_ok = w.simd_ok; p_maxseq = MAX_SEQ
+        # The KV cache is f32 and sized by max_seq regardless of weight quant. For
+        # the large Qwen3 chat models (arch 3=8B/4=14B, nkv=1024) a full MAX_SEQ KV
+        # is ~9.6 GB; in bf16 (16 GB+ weights) that over-commits the 24 GB GPU and
+        # silently corrupts KV. int4 weights leave room, so only cap bf16 — loudly.
+        if w.arch >= 3 and not w.quant:
+            p_maxseq = 16384
+            print("  note: bf16 + large model — capping max_seq to ", p_maxseq,
+                  " so the KV cache fits GPU memory (int4 keeps ", MAX_SEQ, ")", sep="")
         if not w.simd_ok:
             gemm_path = String("scalar tiled (simd probe failed)")
         if model_id.byte_length() == 0:   # default id from detected arch (+quant tag)
