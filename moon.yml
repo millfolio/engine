@@ -1,0 +1,11 @@
+$schema: 'https://moonrepo.dev/schemas/project.json'
+layer: 'application'
+tags: ['mojo']
+dependsOn: ['jinja2', 'flare']
+
+tasks:
+  # check.sh has no engine check today; a lightweight GPU-module compile fills the gap.
+  check:
+    command: 'pixi run build-gpu-hello'
+    toolchain: 'system'
+    inputs: ['src/**/*.mojo', 'pixi.toml', 'pixi.lock']
