@@ -14,7 +14,7 @@ Build/run self-contained:
 from std.sys import has_accelerator
 from std.gpu.host import DeviceContext, DeviceBuffer
 
-from gemma import load_gemma_weights, gemma_layer, G_HIDDEN, SL_NKV, FU_NKV, _is_full_layer
+from models.gemma import load_gemma_weights, gemma_layer, G_HIDDEN, SL_NKV, FU_NKV, _is_full_layer
 from testio import read_f32, max_abs
 
 comptime DevBuf = DeviceBuffer[DType.float32]

@@ -7,13 +7,13 @@ correctness signal for the PLE reconstruction: if the text is coherent, the forw
 substantially right. `pixi run e2b-smoke`."""
 
 from std.gpu.host import DeviceContext
-from gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
-from engine import new_session, sess_prefill_suffix, sess_step, argmax_f, Session
+from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
+from runtime.engine import new_session, sess_prefill_suffix, sess_step, argmax_f, Session
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
-from tensor_ops import probe_simd_gemm
+from runtime.tensor_ops import probe_simd_gemm
 from template import Template
-from model_iface import FAMILY_GEMMA
+from runtime.model_iface import FAMILY_GEMMA
 from json import parse_json
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"

@@ -9,9 +9,9 @@ from std.time import perf_counter_ns
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
-from tensor_ops import DevBuf
-from sampling import process_logits, sample, argmax_f
-from model_iface import ModelWeights
+from runtime.tensor_ops import DevBuf
+from runtime.sampling import process_logits, sample, argmax_f
+from runtime.model_iface import ModelWeights
 
 
 def upload_ids(ctx: DeviceContext, vals: List[Int]) raises -> DeviceBuffer[DType.int32]:

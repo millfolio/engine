@@ -3,9 +3,9 @@ real chat-formatted prompt, print the token ids. Validates the full stacked
 forward (both sliding + full-attention layers + the KV cache) through the generic
 engine. Decode the printed ids with the Gemma tokenizer to eyeball coherence."""
 from std.gpu.host import DeviceContext
-from gemma import load_gemma_weights
-from engine import generate
-from tensor_ops import probe_simd_gemm
+from models.gemma import load_gemma_weights
+from runtime.engine import generate
+from runtime.tensor_ops import probe_simd_gemm
 
 def main() raises:
     var ctx = DeviceContext()

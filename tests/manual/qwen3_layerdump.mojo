@@ -5,9 +5,9 @@ from std.sys import argv
 from std.gpu.host import DeviceContext
 from std.math import sqrt
 from layout import TileTensor, row_major
-from qwen import load_weights
-from engine import new_session, upload_ids
-from tensor_ops import probe_simd_gemm, DevBuf
+from models.qwen import load_weights
+from runtime.engine import new_session, upload_ids
+from runtime.tensor_ops import probe_simd_gemm, DevBuf
 
 comptime SNAP_8B = "/Users/mseritan/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218"
 comptime SNAP_14B = "/Users/mseritan/.cache/huggingface/hub/models--Qwen--Qwen3-14B/snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18"

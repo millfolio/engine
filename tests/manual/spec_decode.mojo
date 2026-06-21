@@ -15,13 +15,13 @@ prose prompt as a control.
 """
 from std.time import perf_counter_ns
 from std.gpu.host import DeviceContext
-from gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
-from engine import generate, generate_spec, new_session, sess_verify, sess_prefill
+from models.gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
+from runtime.engine import generate, generate_spec, new_session, sess_verify, sess_prefill
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
-from tensor_ops import probe_simd_gemm
+from runtime.tensor_ops import probe_simd_gemm
 from template import Template
-from model_iface import FAMILY_GEMMA
+from runtime.model_iface import FAMILY_GEMMA
 from json import parse_json
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-12B-it-bf16/snapshots/afb7b215e9fe3b3eaef462b27d5c9d9b1ba0565b"

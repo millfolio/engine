@@ -5,7 +5,7 @@ multiple calls, a call wrapped in prose, no call at all, and a malformed block â
 and checks the extracted name/arguments and leftover content.
 """
 
-from toolcall import parse_tool_calls, parse_gemma_tool_calls, ParsedReply
+from model import parse_tool_calls, parse_gemma_tool_calls, ParsedReply
 
 
 def expect(cond: Bool, msg: String, mut ok: Bool):

@@ -6,7 +6,7 @@ Covers text, thinking, tool definitions, assistant tool_calls, and tool results
   pixi run mojo run -I src -I ../jinja2.mojo/src -I ../flare tests/manual/gemma_template_test.mojo
 """
 
-from gemma_chat import render_gemma
+from chat.gemma_chat import render_gemma
 from json import parse_json
 
 comptime CASES = "tests/fixtures/gemma/chat_cases.json"

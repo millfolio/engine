@@ -5,9 +5,9 @@ LM head. `pixi run e2b-timing`."""
 
 from std.time import perf_counter_ns
 from std.gpu.host import DeviceContext
-from gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
-from engine import new_session, upload_ids, argmax_f, sess_prefill, Session
-from tensor_ops import DevBuf, probe_simd_gemm
+from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
+from runtime.engine import new_session, upload_ids, argmax_f, sess_prefill, Session
+from runtime.tensor_ops import DevBuf, probe_simd_gemm
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
 

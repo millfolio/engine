@@ -4,10 +4,10 @@ hidden state after layer 0 + the last-position argmax, to localize the bug."""
 
 from std.gpu.host import DeviceContext
 from layout import TileTensor, row_major
-from gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
-from engine import new_session, upload_ids, argmax_f
-from tensor_ops import DevBuf
-from tensor_ops import probe_simd_gemm
+from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
+from runtime.engine import new_session, upload_ids, argmax_f
+from runtime.tensor_ops import DevBuf
+from runtime.tensor_ops import probe_simd_gemm
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
 

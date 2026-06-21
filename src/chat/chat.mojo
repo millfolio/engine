@@ -12,8 +12,8 @@ under the same 1.0.0b2 nightly the GPU engine needs — unlike flare, §11 #11).
 from template import Template
 from value import Value
 from json import parse_json, bytes_to_string, string_to_bytes
-from model_iface import FAMILY_QWEN, FAMILY_GEMMA
-from gemma_chat import render_gemma
+from runtime.model_iface import FAMILY_QWEN, FAMILY_GEMMA
+from chat.gemma_chat import render_gemma
 
 
 def _hex_nibble(n: Int) -> UInt8:

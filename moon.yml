@@ -8,4 +8,7 @@ tasks:
   check:
     command: 'pixi run build-gpu-hello'
     toolchain: 'system'
-    inputs: ['src/**/*.mojo', 'pixi.toml', 'pixi.lock']
+    # src/**/*.mojo covers the entry points, the model facade, and the package
+    # subdirs (kernels/, runtime/, models/, chat/, tokenizer/, io/). The
+    # verification gates live under tests/gates/.
+    inputs: ['src/**/*.mojo', 'tests/gates/**/*.mojo', 'pixi.toml', 'pixi.lock']

@@ -16,7 +16,7 @@ sends): strip_thinking of past assistant content, and multimodal content parts
 """
 
 from value import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
-from gemma_tools import format_argument, format_gemma_tools, dictsort, Q
+from chat.gemma_tools import format_argument, format_gemma_tools, dictsort, Q
 
 
 def _role(msg: Value) -> String:

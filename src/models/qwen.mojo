@@ -23,15 +23,15 @@ from kernels import (
     rope_k_kernel, rope_kv_kernel, rope_q_kernel,
     attn_cached_kernel, attn_cached_rope_kernel, flash_attn_kernel, tc_attn_kernel, FLASH_PW, THETA,
 )
-from tensor_ops import (
+from runtime.tensor_ops import (
     BLOCK, DevBuf, WBuf, PBuf, QMat, qmat_bf16, mm_w_norm, mm_w_add, mm_w_silu_add,
     embed_tokens, mm_norm, last_row, rmsnorm, nll_gather,
 )
-from safetensors import (
+from runtime.safetensors import (
     TensorEntry, gather_tensors, load_named, load_named_bf16, load_proj, fuse_pair, concat_bias,
 )
-from model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, ACT_SILU, ACT_GELU, TOOL_QWEN
-from engine import new_session, upload_ids
+from runtime.model_iface import ModelConfig, ModelWeights, FAMILY_QWEN, ACT_SILU, ACT_GELU, TOOL_QWEN
+from runtime.engine import new_session, upload_ids
 
 # Qwen2.5-0.5B preset (the default when the checkpoint matches hidden==896).
 comptime HQ = 14

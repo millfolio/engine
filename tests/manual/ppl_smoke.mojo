@@ -19,10 +19,10 @@ from std.sys import argv
 from std.os import getenv
 from std.math import exp, isfinite
 from std.gpu.host import DeviceContext
-from qwen import load_weights
-from engine import new_session, sess_token_logprobs
+from models.qwen import load_weights
+from runtime.engine import new_session, sess_token_logprobs
 from tokenizer import load_tokenizer_json, Tokenizer
-from tensor_ops import probe_simd_gemm
+from runtime.tensor_ops import probe_simd_gemm
 
 comptime SESSION_LEN = 4096       # fits every model's KV; correctness, not deploy-fit
                                   # (the server's per-model max_seq cap handles fit)

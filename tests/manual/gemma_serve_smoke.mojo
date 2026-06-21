@@ -8,14 +8,14 @@ server drives, minus flare. Loads the ~7 GB int4 model, so it's a manual test.
 """
 
 from std.gpu.host import DeviceContext
-from gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
-from engine import new_session, sess_prefill_suffix, sess_step, argmax_f, Session
+from models.gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
+from runtime.engine import new_session, sess_prefill_suffix, sess_step, argmax_f, Session
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
-from tensor_ops import probe_simd_gemm
+from runtime.tensor_ops import probe_simd_gemm
 from template import Template
-from model_iface import FAMILY_GEMMA
-from toolcall import parse_gemma_tool_calls
+from runtime.model_iface import FAMILY_GEMMA
+from chat.toolcall import parse_gemma_tool_calls
 from json import parse_json
 
 comptime GEMMA_MAX_SEQ = 4096   # mirror server.GEMMA_MAX_SEQ

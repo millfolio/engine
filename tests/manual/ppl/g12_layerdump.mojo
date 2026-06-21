@@ -5,9 +5,9 @@ full-attention path (head_dim 512, 1 KV, V=k reuse). No HF needed."""
 
 from std.gpu.host import DeviceContext
 from std.math import sqrt
-from gemma import load_gemma_weights, _is_full_layer, G_NLAYERS
-from engine import new_session, upload_ids
-from tensor_ops import probe_simd_gemm, DevBuf
+from models.gemma import load_gemma_weights, _is_full_layer, G_NLAYERS
+from runtime.engine import new_session, upload_ids
+from runtime.tensor_ops import probe_simd_gemm, DevBuf
 from layout import TileTensor, row_major
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--google--gemma-4-12B-it-qat-q4_0-unquantized/snapshots/58540658b6c08edab2ddc1fbde7f28cc9987ced3"

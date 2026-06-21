@@ -7,7 +7,7 @@ map_to_host), so it lives with the engine, not the pure-Python suite.
 """
 
 from std.gpu.host import DeviceContext, DeviceBuffer
-from blockcache import BlockCache
+from model import BlockCache
 
 comptime DevBuf = DeviceBuffer[DType.float32]
 

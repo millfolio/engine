@@ -10,7 +10,7 @@ from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
 from kernels import cvt_kernel, Q4_GROUP, bf16_widen
-from tensor_ops import BLOCK, DevBuf, WBuf, PBuf, QMat, qmat_bf16
+from runtime.tensor_ops import BLOCK, DevBuf, WBuf, PBuf, QMat, qmat_bf16
 
 
 # ── safetensors header (JSON subset) ──────────────────────────────────────────

@@ -9,7 +9,7 @@ prompt, run one decoder layer, and produce final logits (incl. any softcap).
 Adding a family = a new weights struct conforming to this trait + its loader."""
 
 from std.gpu.host import DeviceContext, DeviceBuffer
-from tensor_ops import DevBuf
+from runtime.tensor_ops import DevBuf
 
 # Model-family tags (ModelConfig.family) — the engine is generic, but a few
 # spots still branch on family for diagnostics / banners.

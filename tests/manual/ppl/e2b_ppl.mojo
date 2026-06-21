@@ -5,9 +5,9 @@ confident, the shared logprobs/final-norm path is miscalibrated."""
 
 from std.gpu.host import DeviceContext
 from std.math import log
-from gemma_e2b import load_e2b_weights
-from engine import new_session, upload_ids
-from tensor_ops import probe_simd_gemm
+from models.gemma_e2b import load_e2b_weights
+from runtime.engine import new_session, upload_ids
+from runtime.tensor_ops import probe_simd_gemm
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
 
