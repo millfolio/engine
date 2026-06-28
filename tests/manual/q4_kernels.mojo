@@ -133,7 +133,7 @@ def q4_simd_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """matmul_simd_kernel with int4-dequant W-staging; matmul math identical."""
+    """Matmul_simd_kernel with int4-dequant W-staging; matmul math identical."""
     comptime assert X.flat_rank == 1
     var tid = thread_idx.x
     var sg = Int(tid) // 32

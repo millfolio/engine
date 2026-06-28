@@ -1,4 +1,4 @@
-"""safetensors checkpoint loading: a tiny JSON-subset header parser plus the
+"""Safetensors checkpoint loading: a tiny JSON-subset header parser plus the
 weight loaders that upload bf16 tensors to device (optionally widening to f32 or
 quantizing to group-128 int4). Model-agnostic — dims come from the caller. The
 weight representation types are shared from tensor_ops to avoid an import cycle."""

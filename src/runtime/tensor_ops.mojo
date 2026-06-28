@@ -179,7 +179,7 @@ def mm_w(
     use_bias: Int,
     simd_ok: Bool = False,
 ) raises -> DevBuf:
-    """mm() for a QMat weight: bf16 path (delegates to mm) or group-128 int4. The
+    """Mm() for a QMat weight: bf16 path (delegates to mm) or group-128 int4. The
     int4 dispatch mirrors mm — GEMV at M=1 (decode), simdgroup-matrix GEMM at
     M>1 with the probe on (prefill), scalar-tiled fallback otherwise."""
     if not w.q4:
@@ -392,7 +392,7 @@ def mm_w_norm(
     use_bias: Int,
     simd_ok: Bool = False,
 ) raises -> DevBuf:
-    """mm_norm() for a QMat weight: fused-norm int4 GEMV at decode (M=1), else
+    """Mm_norm() for a QMat weight: fused-norm int4 GEMV at decode (M=1), else
     rmsnorm + mm_w at prefill. Folds the pre-projection RMSNorm into qkv/gate_up.
     """
     if not w.q4:
@@ -432,7 +432,7 @@ def mm_w_silu_add(
     N: Int,
     simd_ok: Bool = False,
 ) raises -> DevBuf:
-    """down-proj with SwiGLU fused on the input + residual on the output, at decode
+    """Down-proj with SwiGLU fused on the input + residual on the output, at decode
     (M=1): Y = silu(gate)·up · Wᵀ + resid, reading the fused gate|up buffer directly
     — drops the silu_mul_cat launch and its `act` buffer. Prefill (M>1) falls back
     to silu_mul_cat + mm_w_add (unchanged)."""
@@ -594,7 +594,7 @@ def gelu_mul_strided(
     stride: Int,
     off: Int,
 ) raises -> DevBuf:
-    """gelu(a[t,j])·p[t, off+j] — PLE gate fused with the strided per-layer-input slice.
+    """Gelu(a[t,j])·p[t, off+j] — PLE gate fused with the strided per-layer-input slice.
     """
     var y = ctx.enqueue_create_buffer[DType.float32](T * n)
     var lay = row_major(T * n)
@@ -759,7 +759,7 @@ def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
 def mul_scalar(
     ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32
 ) raises -> DevBuf:
-    """y = x * c. Gemma embedding ×√hidden and per-layer learned scalar."""
+    """Y = x * c. Gemma embedding ×√hidden and per-layer learned scalar."""
     var y = ctx.enqueue_create_buffer[DType.float32](n)
     var lay = row_major(n)
     comptime k = mul_scalar_kernel[type_of(lay)]

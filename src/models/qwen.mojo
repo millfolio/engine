@@ -589,7 +589,7 @@ def rope_kv(
     k_off: Int,
     v_off: Int,
 ) raises:
-    """rope_k + the V cache-copy in one launch (rope_kv_kernel): rotates K into the
+    """Rope_k + the V cache-copy in one launch (rope_kv_kernel): rotates K into the
     cache and copies V into the cache from the fused [q|k|v] buffer — one dispatch
     instead of two per layer."""
     var lay = row_major(Tq * in_stride)

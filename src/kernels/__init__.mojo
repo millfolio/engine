@@ -652,7 +652,7 @@ def matmul_norm_kernel[
     N: Int,
     use_bias: Int,
 ):
-    """bf16 decode GEMV with RMSNorm fused into the input row: each warp already
+    """Bf16 decode GEMV with RMSNorm fused into the input row: each warp already
     streams the full input row x[k] for its dot, so it accumulates Σx[k]² in the
     same K-loop — `out = (Σ x[k]·lnw[k]·W[n,k]) / rms`, rms = √(mean(x²)+EPS) — and
     the separate RMSNorm launch (and its x round-trip) disappears (decode only).
@@ -695,7 +695,7 @@ def matmul_q4_norm_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """int4 decode GEMV with RMSNorm fused in (see matmul_norm_kernel). Folds the
+    """Int4 decode GEMV with RMSNorm fused in (see matmul_norm_kernel). Folds the
     pre-projection RMSNorm into the qkv / gate_up GEMVs — −2 launches per layer.
     """
     comptime assert X.flat_rank == 1
@@ -751,7 +751,7 @@ def matmul_q4_resid_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """matmul_q4_kernel with a fused residual add (Y = X·Wᵀ(+bias) + R). Folds the
+    """Matmul_q4_kernel with a fused residual add (Y = X·Wᵀ(+bias) + R). Folds the
     decode residual into the proj GEMV, saving one launch per layer (×2: o & down).
     """
     comptime assert X.flat_rank == 1
@@ -803,7 +803,7 @@ def matmul_resid_kernel[
     N: Int,
     use_bias: Int,
 ):
-    """matmul_kernel (bf16 decode GEMV) with a fused residual add."""
+    """Matmul_kernel (bf16 decode GEMV) with a fused residual add."""
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -839,7 +839,7 @@ def matmul_q4_silu_resid_kernel[
     N: Int,
     NG: Int,
 ):
-    """int4 down-proj decode GEMV with SwiGLU fused on the input: reads the fused
+    """Int4 down-proj decode GEMV with SwiGLU fused on the input: reads the fused
     gate|up GEMV output and forms act[k]=silu(gate[k])·up[k] on load, so the
     separate silu_mul_cat launch (and its `act` buffer) disappears. K = inter, so
     up[k] is GU[k+K]. Residual fused in the epilogue (down's resid)."""
@@ -886,7 +886,7 @@ def matmul_silu_resid_kernel[
     K: Int,
     N: Int,
 ):
-    """bf16 down-proj decode GEMV with SwiGLU fused on the input (see q4 variant).
+    """Bf16 down-proj decode GEMV with SwiGLU fused on the input (see q4 variant).
     """
     comptime assert GU.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
@@ -923,7 +923,7 @@ def matmul_tiled_q4_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """int4 scalar prefill fallback — matmul_tiled_kernel with q4_deq W-reads.
+    """Int4 scalar prefill fallback — matmul_tiled_kernel with q4_deq W-reads.
     Used only if the simdgroup-matrix probe fails."""
     comptime assert X.flat_rank == 1
     var ncols = ceildiv(N, CN)
@@ -971,7 +971,7 @@ def matmul_simd_q4_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """int4 prefill GEMM on the compact 8×8 simdgroup-matrix units, with the
+    """Int4 prefill GEMM on the compact 8×8 simdgroup-matrix units, with the
     weight tile **dequantized into threadgroup shared memory once per block**
     (MLX's `QuantizedBlockLoader` pattern). The earlier version filled each B
     fragment from `q4_deq` *every* K-step from global — unpacking+scaling in the
@@ -1116,7 +1116,7 @@ def matmul_q4_small_kernel[
     NG: Int,
     use_bias: Int,
 ):
-    """int4 GEMM for M ≤ 8 (speculative verify). grid=(ceildiv(N,_SM_BN),1),
+    """Int4 GEMM for M ≤ 8 (speculative verify). grid=(ceildiv(N,_SM_BN),1),
     block_dim=_SM_TPB. One 8-row MMA tile (row_base=0) is shared across the block's
     `_SM_NSG` col-simdgroups; W[blk_col..+64, kc..+_SM_BK] is cooperatively
     dequantized into shared once per K-chunk and each simdgroup MMAs its 2 col-
@@ -1583,7 +1583,7 @@ def rope_kv_kernel[
     theta: Float32 = THETA,
     rot_pairs: Int = -1,
 ):
-    """rope_k_kernel + the V cache-copy in ONE launch: one thread per token×kv-head
+    """Rope_k_kernel + the V cache-copy in ONE launch: one thread per token×kv-head
     rotates that head's K into the cache AND copies its V into the cache. Both
     already walked the same (token, kv-head) grid and wrote a per-head cache slice,
     so merging halves the K/V write dispatches (rope_k + copy_strided → 1)."""
@@ -1788,7 +1788,7 @@ def attn_cached_rope_kernel[
     q_stride: Int,
     q_off: Int,
 ):
-    """attn_cached_kernel with RoPE applied to Q *on load* — folds the rope_q launch
+    """Attn_cached_kernel with RoPE applied to Q *on load* — folds the rope_q launch
     (and its rotated-Q buffer) into attention at decode. With HALF=HEAD_DIM/2 the Q
     register chunk c pairs element-wise with chunk c+NVEC/2, so qreg is rotated in
     place with vectorized cos/sin (no extra registers). Qwen3 applies q_norm/RMS per
