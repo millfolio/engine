@@ -4,9 +4,13 @@ tags: ['mojo']
 dependsOn: ['jinja2', 'flare']
 
 tasks:
-  # check.sh has no engine check today; a lightweight GPU-module compile fills the gap.
+  # The weight-free CPU gate aggregate (test = test-toolcall + test-server-bind);
+  # it compiles engine source through the gates and runs without model weights or a
+  # Metal/GPU toolchain, so it is portable as a pre-push gate. The GPU compile
+  # (build-gpu-hello) and weight-bearing gates (tests/manual/, `pixi run gpu-check`)
+  # stay out of `check` — run those in CI / on a Metal-capable machine.
   check:
-    command: 'pixi run build-gpu-hello'
+    command: 'pixi run test'
     toolchain: 'system'
     # src/**/*.mojo covers the entry points, the model facade, and the package
     # subdirs (kernels/, runtime/, models/, chat/, tokenizer/, io/). The

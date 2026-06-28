@@ -13,7 +13,7 @@ channels = [
 platforms = ["osx-arm64"]
 
 [dependencies]
-mojo = "==1.0.0b3.dev2026062206"
+mojo = "==1.0.0b3.dev2026062706"
 
 # The conformance oracle (ARCHITECTURE.md §7) — a SEPARATE environment so the
 # default build stays Mojo-only and fast. transformers/torch on CPU/f32 is the
@@ -91,6 +91,12 @@ test-server-bind = "mojo run -I src -I ../flare -I ../json tests/gates/test_serv
 # Run by .github/workflows/test.yml on every push/PR. (The GPU/weights gates stay
 # manual via their own tasks — see CLAUDE.md.)
 test = { depends-on = ["test-toolcall", "test-server-bind"] }
+
+# GPU gate aggregate — the weight-free Metal gates (compile a GPU kernel, then
+# matmul/RMSNorm/SwiGLU, simdgroup GEMM, and RoPE+GQA attention vs the reference).
+# Needs the Xcode Metal Toolchain (see the gpu-metal-toolchain note). Run as part
+# of the RELEASE preflight; not in the portable pre-push `moon :check`.
+test-gpu = { depends-on = ["build-gpu-hello", "test-kernels", "test-simd-gemm", "test-attention"] }
 
 # Disk block KV-cache roundtrip (io/blockcache.mojo): store -> corrupt -> restore
 # bit-identical, chained-hash determinism, collision guard. Needs the GPU.
