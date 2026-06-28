@@ -34,14 +34,17 @@ struct TensorEntry(Copyable, Movable):
 def is_ws(c: Int) -> Bool:
     return c == 32 or c == 9 or c == 10 or c == 13
 
+
 def skip_ws(buf: List[UInt8], mut pos: Int):
     while pos < len(buf) and is_ws(Int(buf[pos])):
         pos += 1
+
 
 def expect(buf: List[UInt8], mut pos: Int, ch: Int) raises:
     if pos >= len(buf) or Int(buf[pos]) != ch:
         raise Error("parse error at byte " + String(pos))
     pos += 1
+
 
 def parse_string(buf: List[UInt8], mut pos: Int) raises -> String:
     expect(buf, pos, QUOTE)
@@ -52,6 +55,7 @@ def parse_string(buf: List[UInt8], mut pos: Int) raises -> String:
     expect(buf, pos, QUOTE)
     return s^
 
+
 def parse_uint(buf: List[UInt8], mut pos: Int) raises -> Int:
     var v = 0
     var start = pos
@@ -61,6 +65,7 @@ def parse_uint(buf: List[UInt8], mut pos: Int) raises -> Int:
     if pos == start:
         raise Error("expected int at " + String(pos))
     return v
+
 
 def parse_int_array(buf: List[UInt8], mut pos: Int) raises -> List[Int]:
     var out = List[Int]()
@@ -79,6 +84,7 @@ def parse_int_array(buf: List[UInt8], mut pos: Int) raises -> List[Int]:
         break
     expect(buf, pos, RBRACK)
     return out^
+
 
 def skip_value(buf: List[UInt8], mut pos: Int) raises:
     skip_ws(buf, pos)
@@ -108,6 +114,7 @@ def skip_value(buf: List[UInt8], mut pos: Int) raises:
                 break
             pos += 1
 
+
 def skip_object(buf: List[UInt8], mut pos: Int) raises:
     expect(buf, pos, LBRACE)
     skip_ws(buf, pos)
@@ -126,6 +133,7 @@ def skip_object(buf: List[UInt8], mut pos: Int) raises:
             continue
         break
     expect(buf, pos, RBRACE)
+
 
 def parse_header(buf: List[UInt8]) raises -> List[TensorEntry]:
     var entries = List[TensorEntry]()
@@ -175,6 +183,7 @@ def parse_header(buf: List[UInt8]) raises -> List[TensorEntry]:
         break
     return entries^
 
+
 def read_header(path: String) raises -> List[TensorEntry]:
     """Parse the header; entries' begin/end are ABSOLUTE file offsets."""
     with open(path, "r") as f:
@@ -193,7 +202,10 @@ def read_header(path: String) raises -> List[TensorEntry]:
 
 # ── weight loading (bf16 → f32 on device) ─────────────────────────────────────
 
-def load_one(ctx: DeviceContext, path: String, begin: Int, end: Int) raises -> DevBuf:
+
+def load_one(
+    ctx: DeviceContext, path: String, begin: Int, end: Int
+) raises -> DevBuf:
     var nbytes = end - begin
     var count = nbytes // 2
     var dev_f32 = ctx.enqueue_create_buffer[DType.float32](count)
@@ -202,25 +214,40 @@ def load_one(ctx: DeviceContext, path: String, begin: Int, end: Int) raises -> D
         var raw = f.read_bytes(nbytes)
         var host = ctx.enqueue_create_host_buffer[DType.uint16](count)
         ctx.synchronize()
-        memcpy(dest=host.unsafe_ptr().bitcast[UInt8](), src=raw.unsafe_ptr(), count=nbytes)
+        memcpy(
+            dest=host.unsafe_ptr().bitcast[UInt8](),
+            src=raw.unsafe_ptr(),
+            count=nbytes,
+        )
         var dev_u16 = ctx.enqueue_create_buffer[DType.uint16](count)
         ctx.enqueue_copy(dev_u16, host)
         var lay = row_major(count)
         comptime k = cvt_kernel[type_of(lay)]
         ctx.enqueue_function[k](
-            TileTensor(dev_u16, lay), TileTensor(dev_f32, lay), count,
-            grid_dim=ceildiv(count, BLOCK), block_dim=BLOCK,
+            TileTensor(dev_u16, lay),
+            TileTensor(dev_f32, lay),
+            count,
+            grid_dim=ceildiv(count, BLOCK),
+            block_dim=BLOCK,
         )
         ctx.synchronize()
     return dev_f32^
 
-def load_named(ctx: DeviceContext, paths: List[String], entries: List[TensorEntry],
-               name2idx: Dict[String, Int], name: String) raises -> DevBuf:
+
+def load_named(
+    ctx: DeviceContext,
+    paths: List[String],
+    entries: List[TensorEntry],
+    name2idx: Dict[String, Int],
+    name: String,
+) raises -> DevBuf:
     var idx = name2idx[name]
     return load_one(ctx, paths[idx], entries[idx].begin, entries[idx].end)
 
 
-def load_one_bf16(ctx: DeviceContext, path: String, begin: Int, end: Int) raises -> WBuf:
+def load_one_bf16(
+    ctx: DeviceContext, path: String, begin: Int, end: Int
+) raises -> WBuf:
     """Load a bf16 tensor to device *without* widening to f32 — the matmul/embed
     kernels widen per element (bf16_widen), halving weight read traffic (§11 #12).
     The raw safetensors bytes are already bf16, so this is a plain upload."""
@@ -250,23 +277,31 @@ def load_one_bf16(ctx: DeviceContext, path: String, begin: Int, end: Int) raises
         ctx.synchronize()
     return dev_u16^
 
-def load_named_bf16(ctx: DeviceContext, paths: List[String], entries: List[TensorEntry],
-                    name2idx: Dict[String, Int], name: String) raises -> WBuf:
+
+def load_named_bf16(
+    ctx: DeviceContext,
+    paths: List[String],
+    entries: List[TensorEntry],
+    name2idx: Dict[String, Int],
+    name: String,
+) raises -> WBuf:
     var idx = name2idx[name]
     return load_one_bf16(ctx, paths[idx], entries[idx].begin, entries[idx].end)
 
 
-def load_one_q4(ctx: DeviceContext, path: String, begin: Int, end: Int, K: Int) raises -> QMat:
+def load_one_q4(
+    ctx: DeviceContext, path: String, begin: Int, end: Int, K: Int
+) raises -> QMat:
     """Load a bf16 weight [N,K] (row-major; K = reduction dim, a multiple of 128)
     and quantize it to group-128 int4 on the host — symmetric RTN, scale per
     128-wide group along K. Reads the raw bf16 bytes (no full-precision copy ever
     reaches the device), packs 8 nibbles/u32, uploads packed+scales. One-time at
     load (host-side, so it is not fast — a few minutes for the 3B)."""
     var nbytes = end - begin
-    var count = nbytes // 2                    # u16 weights = N*K
+    var count = nbytes // 2  # u16 weights = N*K
     var N = count // K
     var NG = K // Q4_GROUP
-    var pcount = count // 8                     # u32 words = N*K/8
+    var pcount = count // 8  # u32 words = N*K/8
     var packed_host = ctx.enqueue_create_host_buffer[DType.uint32](pcount)
     var scales_host = ctx.enqueue_create_host_buffer[DType.float32](N * NG)
     ctx.synchronize()
@@ -277,7 +312,7 @@ def load_one_q4(ctx: DeviceContext, path: String, begin: Int, end: Int, K: Int) 
     with open(path, "r") as f:
         _ = f.seek(UInt64(begin))
         var raw = f.read_bytes(nbytes)
-        var u16 = raw.unsafe_ptr().bitcast[UInt16]()    # little-endian bf16 bits
+        var u16 = raw.unsafe_ptr().bitcast[UInt16]()  # little-endian bf16 bits
         for n in range(N):
             for g in range(NG):
                 var amax = Float32(0.0)
@@ -298,26 +333,52 @@ def load_one_q4(ctx: DeviceContext, path: String, begin: Int, end: Int, K: Int) 
                     elif qr < -7:
                         qr = -7
                     var lin = n * K + k
-                    pp[lin >> 3] = pp[lin >> 3] | (UInt32(qr + 8) << UInt32((lin & 7) * 4))
+                    pp[lin >> 3] = pp[lin >> 3] | (
+                        UInt32(qr + 8) << UInt32((lin & 7) * 4)
+                    )
     var packed_dev = ctx.enqueue_create_buffer[DType.uint32](pcount)
     var scales_dev = ctx.enqueue_create_buffer[DType.float32](N * NG)
     ctx.enqueue_copy(packed_dev, packed_host)
     ctx.enqueue_copy(scales_dev, scales_host)
     ctx.synchronize()
-    return QMat(ctx.enqueue_create_buffer[DType.uint16](1), packed_dev^, scales_dev^, True)
+    return QMat(
+        ctx.enqueue_create_buffer[DType.uint16](1),
+        packed_dev^,
+        scales_dev^,
+        True,
+    )
 
 
-def load_proj(ctx: DeviceContext, paths: List[String], entries: List[TensorEntry],
-              name2idx: Dict[String, Int], name: String, K: Int, q4: Bool) raises -> QMat:
+def load_proj(
+    ctx: DeviceContext,
+    paths: List[String],
+    entries: List[TensorEntry],
+    name2idx: Dict[String, Int],
+    name: String,
+    K: Int,
+    q4: Bool,
+) raises -> QMat:
     """A projection weight as QMat: int4 (group-128) if `q4` else bf16."""
     var idx = name2idx[name]
     if q4:
-        return load_one_q4(ctx, paths[idx], entries[idx].begin, entries[idx].end, K)
-    return qmat_bf16(ctx, load_one_bf16(ctx, paths[idx], entries[idx].begin, entries[idx].end))
+        return load_one_q4(
+            ctx, paths[idx], entries[idx].begin, entries[idx].end, K
+        )
+    return qmat_bf16(
+        ctx,
+        load_one_bf16(ctx, paths[idx], entries[idx].begin, entries[idx].end),
+    )
 
 
-def fuse_pair(ctx: DeviceContext, var a: QMat, var b: QMat,
-              Na: Int, Nb: Int, K: Int, q4: Bool) raises -> QMat:
+def fuse_pair(
+    ctx: DeviceContext,
+    var a: QMat,
+    var b: QMat,
+    Na: Int,
+    Nb: Int,
+    K: Int,
+    q4: Bool,
+) raises -> QMat:
     """Concatenate two same-K projection weights along the output dim N (a's rows
     then b's) into one QMat, so a single GEMV computes both (e.g. gate|up, q|k|v).
     Host-side copy at load — a/b are already the right representation."""
@@ -330,34 +391,73 @@ def fuse_pair(ctx: DeviceContext, var a: QMat, var b: QMat,
         var sc = ctx.enqueue_create_buffer[DType.float32](sa + sb)
         with pc.map_to_host() as d:
             with a.packed.map_to_host() as ah:
-                memcpy(dest=d.unsafe_ptr().bitcast[UInt8](), src=ah.unsafe_ptr().bitcast[UInt8](), count=wa * 4)
+                memcpy(
+                    dest=d.unsafe_ptr().bitcast[UInt8](),
+                    src=ah.unsafe_ptr().bitcast[UInt8](),
+                    count=wa * 4,
+                )
             with b.packed.map_to_host() as bh:
-                memcpy(dest=(d.unsafe_ptr() + wa).bitcast[UInt8](), src=bh.unsafe_ptr().bitcast[UInt8](), count=wb * 4)
+                memcpy(
+                    dest=(d.unsafe_ptr() + wa).bitcast[UInt8](),
+                    src=bh.unsafe_ptr().bitcast[UInt8](),
+                    count=wb * 4,
+                )
         with sc.map_to_host() as d:
             with a.scales.map_to_host() as ah:
-                memcpy(dest=d.unsafe_ptr().bitcast[UInt8](), src=ah.unsafe_ptr().bitcast[UInt8](), count=sa * 4)
+                memcpy(
+                    dest=d.unsafe_ptr().bitcast[UInt8](),
+                    src=ah.unsafe_ptr().bitcast[UInt8](),
+                    count=sa * 4,
+                )
             with b.scales.map_to_host() as bh:
-                memcpy(dest=(d.unsafe_ptr() + sa).bitcast[UInt8](), src=bh.unsafe_ptr().bitcast[UInt8](), count=sb * 4)
+                memcpy(
+                    dest=(d.unsafe_ptr() + sa).bitcast[UInt8](),
+                    src=bh.unsafe_ptr().bitcast[UInt8](),
+                    count=sb * 4,
+                )
         return QMat(ctx.enqueue_create_buffer[DType.uint16](1), pc^, sc^, True)
     var na = Na * K
     var nb = Nb * K
     var bc = ctx.enqueue_create_buffer[DType.uint16](na + nb)
     with bc.map_to_host() as d:
         with a.bf16.map_to_host() as ah:
-            memcpy(dest=d.unsafe_ptr().bitcast[UInt8](), src=ah.unsafe_ptr().bitcast[UInt8](), count=na * 2)
+            memcpy(
+                dest=d.unsafe_ptr().bitcast[UInt8](),
+                src=ah.unsafe_ptr().bitcast[UInt8](),
+                count=na * 2,
+            )
         with b.bf16.map_to_host() as bh:
-            memcpy(dest=(d.unsafe_ptr() + na).bitcast[UInt8](), src=bh.unsafe_ptr().bitcast[UInt8](), count=nb * 2)
-    return QMat(bc^, ctx.enqueue_create_buffer[DType.uint32](1), ctx.enqueue_create_buffer[DType.float32](1), False)
+            memcpy(
+                dest=(d.unsafe_ptr() + na).bitcast[UInt8](),
+                src=bh.unsafe_ptr().bitcast[UInt8](),
+                count=nb * 2,
+            )
+    return QMat(
+        bc^,
+        ctx.enqueue_create_buffer[DType.uint32](1),
+        ctx.enqueue_create_buffer[DType.float32](1),
+        False,
+    )
 
 
-def concat_bias(ctx: DeviceContext, var a: DevBuf, var b: DevBuf, na: Int, nb: Int) raises -> DevBuf:
+def concat_bias(
+    ctx: DeviceContext, var a: DevBuf, var b: DevBuf, na: Int, nb: Int
+) raises -> DevBuf:
     """Concatenate two f32 bias vectors (for the fused QKV bias)."""
     var c = ctx.enqueue_create_buffer[DType.float32](na + nb)
     with c.map_to_host() as d:
         with a.map_to_host() as ah:
-            memcpy(dest=d.unsafe_ptr().bitcast[UInt8](), src=ah.unsafe_ptr().bitcast[UInt8](), count=na * 4)
+            memcpy(
+                dest=d.unsafe_ptr().bitcast[UInt8](),
+                src=ah.unsafe_ptr().bitcast[UInt8](),
+                count=na * 4,
+            )
         with b.map_to_host() as bh:
-            memcpy(dest=(d.unsafe_ptr() + na).bitcast[UInt8](), src=bh.unsafe_ptr().bitcast[UInt8](), count=nb * 4)
+            memcpy(
+                dest=(d.unsafe_ptr() + na).bitcast[UInt8](),
+                src=bh.unsafe_ptr().bitcast[UInt8](),
+                count=nb * 4,
+            )
     return c^
 
 
@@ -392,7 +492,7 @@ def _parse_shard_names(buf: List[UInt8]) raises -> List[String]:
             if Int(buf[pos]) != RBRACE:
                 while True:
                     skip_ws(buf, pos)
-                    _ = parse_string(buf, pos)          # tensor name (ignored)
+                    _ = parse_string(buf, pos)  # tensor name (ignored)
                     skip_ws(buf, pos)
                     expect(buf, pos, COLON)
                     skip_ws(buf, pos)
@@ -420,11 +520,14 @@ def _parse_shard_names(buf: List[UInt8]) raises -> List[String]:
     return names^
 
 
-def gather_tensors(path: String) raises -> Tuple[List[TensorEntry], List[String]]:
+def gather_tensors(
+    path: String,
+) raises -> Tuple[List[TensorEntry], List[String]]:
     """Resolve a checkpoint into (entries, per-entry file path). `path` is either a
     single .safetensors file (0.5B in the HF cache is one blob) or a directory
     holding sharded shards + model.safetensors.index.json (3B). Detection: try to
-    open the index inside `path`-as-dir; absent → treat `path` as a single file."""
+    open the index inside `path`-as-dir; absent → treat `path` as a single file.
+    """
     var entries = List[TensorEntry]()
     var paths = List[String]()
     var shards = List[String]()

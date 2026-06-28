@@ -30,12 +30,14 @@ def read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
 
+
 def to_bytes(s: String) -> List[UInt8]:
     var out = List[UInt8]()
     var sb = s.as_bytes()
     for i in range(len(sb)):
         out.append(sb[i])
     return out^
+
 
 def main() raises:
     var user = String("What is the capital of France?")
@@ -49,7 +51,11 @@ def main() raises:
 
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
-        ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
+        ckpt = String(
+            String(
+                read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
+            ).strip()
+        )
 
     var tok = load_tokenizer("tests/fixtures/tokenizer/")
     var tmpl = load_chat_template(TEMPLATE)

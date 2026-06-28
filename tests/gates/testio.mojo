@@ -20,7 +20,9 @@ def upload_f32(ctx: DeviceContext, host: List[Float32]) raises -> DevBuf:
     return dev^
 
 
-def upload_bf16(ctx: DeviceContext, host: List[Float32]) raises -> DeviceBuffer[DType.uint16]:
+def upload_bf16(
+    ctx: DeviceContext, host: List[Float32]
+) raises -> DeviceBuffer[DType.uint16]:
     """Truncate f32 → bf16 (round-to-nearest-even on the dropped 16 bits) and
     upload as raw u16 — matches how the model's bf16 weights live on device, so
     the matmul gate exercises the real (bf16-weight) kernel path (§11 #12)."""

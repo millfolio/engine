@@ -40,6 +40,7 @@ def _mix(h0: UInt64, v: UInt64) -> UInt64:
         h = (h ^ ((v >> UInt64(8 * b)) & UInt64(0xFF))) * FNV_PRIME
     return h
 
+
 def _hex16(h: UInt64) -> String:
     var s = String("")
     for i in range(16):
@@ -47,9 +48,11 @@ def _hex16(h: UInt64) -> String:
         s += chr(48 + nib) if nib < 10 else chr(97 + nib - 10)
     return s
 
+
 def _read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
+
 
 def _write_text(path: String, s: String) raises:
     with open(path, "w") as f:
@@ -57,16 +60,25 @@ def _write_text(path: String, s: String) raises:
 
 
 struct BlockCache(Movable):
-    var dir: String        # store directory (per model)
-    var B: Int             # tokens per block
-    var nkv: Int           # K/V row width = HKV * HEAD_DIM
+    var dir: String  # store directory (per model)
+    var B: Int  # tokens per block
+    var nkv: Int  # K/V row width = HKV * HEAD_DIM
     var nlayers: Int
-    var max_blocks: Int    # budget / per-block bytes
+    var max_blocks: Int  # budget / per-block bytes
     var enabled: Bool
-    var order: List[String]  # block hex hashes, LRU order (oldest first) = inventory
+    var order: List[
+        String
+    ]  # block hex hashes, LRU order (oldest first) = inventory
 
-    def __init__(out self, dir: String, B: Int, nkv: Int, nlayers: Int,
-                 budget_bytes: Int, model_id: String):
+    def __init__(
+        out self,
+        dir: String,
+        B: Int,
+        nkv: Int,
+        nlayers: Int,
+        budget_bytes: Int,
+        model_id: String,
+    ):
         self.dir = dir
         self.B = B
         self.nkv = nkv
@@ -79,13 +91,28 @@ struct BlockCache(Movable):
             makedirs(dir, exist_ok=True)
             self._init_meta(model_id)
         except:
-            self.enabled = False  # any fs trouble → cache disabled, server still works
+            self.enabled = (
+                False  # any fs trouble → cache disabled, server still works
+            )
 
     def _init_meta(mut self, model_id: String) raises:
         # Stamp dims; if an existing store doesn't match, wipe it (stale model).
-        var stamp = model_id + "\n" + String(self.B) + "\n" + String(self.nkv) + "\n" + String(self.nlayers) + "\n"
+        var stamp = (
+            model_id
+            + "\n"
+            + String(self.B)
+            + "\n"
+            + String(self.nkv)
+            + "\n"
+            + String(self.nlayers)
+            + "\n"
+        )
         var meta = self.dir + "/meta"
-        if exists(meta) and _read_text(meta) == stamp and exists(self.dir + "/index"):
+        if (
+            exists(meta)
+            and _read_text(meta) == stamp
+            and exists(self.dir + "/index")
+        ):
             for line in _read_text(self.dir + "/index").split("\n"):
                 var h = String(String(line).strip())
                 if h.byte_length() > 0:
@@ -111,7 +138,8 @@ struct BlockCache(Movable):
         return self.dir + "/" + hex + ".blk"
 
     def chained_hashes(self, ids: List[Int]) -> List[UInt64]:
-        """One chained hash per full B-token block of `ids` (partial tail ignored)."""
+        """One chained hash per full B-token block of `ids` (partial tail ignored).
+        """
         var out = List[UInt64]()
         var nblocks = len(ids) // self.B
         var h = FNV_OFFSET
@@ -122,7 +150,8 @@ struct BlockCache(Movable):
         return out^
 
     def _ids_match(self, path: String, ids: List[Int], bi: Int) raises -> Bool:
-        """Collision check: the block file's stored token ids == ids[bi*B:(bi+1)*B]."""
+        """Collision check: the block file's stored token ids == ids[bi*B:(bi+1)*B].
+        """
         with open(path, "r") as f:
             var raw = f.read_bytes(self.B * 4)
             if len(raw) < self.B * 4:
@@ -134,7 +163,8 @@ struct BlockCache(Movable):
         return True
 
     def longest_run(self, hashes: List[UInt64], ids: List[Int]) raises -> Int:
-        """Number of leading blocks present on disk (with matching token ids)."""
+        """Number of leading blocks present on disk (with matching token ids).
+        """
         if not self.enabled:
             return 0
         var run = 0
@@ -157,41 +187,74 @@ struct BlockCache(Movable):
             buf.append(UInt8((v >> 24) & 0xFF))
         f.write_bytes(Span(buf))
 
-    def store_blocks(self, mut kcs: List[DevBuf], mut vcs: List[DevBuf],
-                     hashes: List[UInt64], ids: List[Int], a: Int, b: Int) raises:
+    def store_blocks(
+        self,
+        mut kcs: List[DevBuf],
+        mut vcs: List[DevBuf],
+        hashes: List[UInt64],
+        ids: List[Int],
+        a: Int,
+        b: Int,
+    ) raises:
         """Write blocks [a, b) from the session's K/V buffers to disk."""
         if not self.enabled:
             return
-        var slice_f = self.B * self.nkv               # floats per (block, layer) slice
+        var slice_f = self.B * self.nkv  # floats per (block, layer) slice
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "w") as f:
                 self._write_ids(f, ids, bi * self.B)
                 for l in range(self.nlayers):
                     with kcs[l].map_to_host() as h:
-                        var p = h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
-                        f.write_bytes(Span[UInt8, MutUntrackedOrigin](ptr=p, length=slice_f * 4))
+                        var p = (
+                            h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
+                        )
+                        f.write_bytes(
+                            Span[UInt8, MutUntrackedOrigin](
+                                ptr=p, length=slice_f * 4
+                            )
+                        )
                     with vcs[l].map_to_host() as h:
-                        var p = h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
-                        f.write_bytes(Span[UInt8, MutUntrackedOrigin](ptr=p, length=slice_f * 4))
+                        var p = (
+                            h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
+                        )
+                        f.write_bytes(
+                            Span[UInt8, MutUntrackedOrigin](
+                                ptr=p, length=slice_f * 4
+                            )
+                        )
 
-    def restore_blocks(self, mut kcs: List[DevBuf], mut vcs: List[DevBuf],
-                       hashes: List[UInt64], a: Int, b: Int) raises:
+    def restore_blocks(
+        self,
+        mut kcs: List[DevBuf],
+        mut vcs: List[DevBuf],
+        hashes: List[UInt64],
+        a: Int,
+        b: Int,
+    ) raises:
         """Load blocks [a, b) from disk into the session's K/V buffers."""
         if not self.enabled:
             return
         var slice_f = self.B * self.nkv
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "r") as f:
-                _ = f.read_bytes(self.B * 4)   # skip the token-id header
+                _ = f.read_bytes(self.B * 4)  # skip the token-id header
                 for l in range(self.nlayers):
                     with kcs[l].map_to_host() as h:
                         var raw = f.read_bytes(slice_f * 4)
-                        memcpy(dest=h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4,
-                               src=raw.unsafe_ptr(), count=slice_f * 4)
+                        memcpy(
+                            dest=h.unsafe_ptr().bitcast[UInt8]()
+                            + bi * slice_f * 4,
+                            src=raw.unsafe_ptr(),
+                            count=slice_f * 4,
+                        )
                     with vcs[l].map_to_host() as h:
                         var raw = f.read_bytes(slice_f * 4)
-                        memcpy(dest=h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4,
-                               src=raw.unsafe_ptr(), count=slice_f * 4)
+                        memcpy(
+                            dest=h.unsafe_ptr().bitcast[UInt8]()
+                            + bi * slice_f * 4,
+                            src=raw.unsafe_ptr(),
+                            count=slice_f * 4,
+                        )
 
     def touch_and_evict(mut self, hashes: List[UInt64], nblocks: Int) raises:
         """Move this request's blocks to the LRU tail, then evict from the front

@@ -60,7 +60,11 @@ def _map_pairs(m: Value) raises -> String:
     for ii in range(len(idx)):
         if ii > 0:
             out += ","
-        out += m.c[].keys[idx[ii]] + ":" + format_argument(m.c[].vals[idx[ii]], False)
+        out += (
+            m.c[].keys[idx[ii]]
+            + ":"
+            + format_argument(m.c[].vals[idx[ii]], False)
+        )
     return out^
 
 
@@ -135,12 +139,15 @@ def render_gemma(req: Value) raises -> String:
     var et = req.map_get("enable_thinking")
     var thinking = Bool(et) and et.value().tag == VBOOL and et.value().b
     var to = req.map_get("tools")
-    var has_tools = Bool(to) and to.value().tag == VLIST and len(to.value().c[].vals) > 0
+    var has_tools = (
+        Bool(to) and to.value().tag == VLIST and len(to.value().c[].vals) > 0
+    )
 
     var out = String("<bos>")
 
-    var first_is_system = n > 0 and (_role(M.c[].vals[0]) == "system"
-                                     or _role(M.c[].vals[0]) == "developer")
+    var first_is_system = n > 0 and (
+        _role(M.c[].vals[0]) == "system" or _role(M.c[].vals[0]) == "developer"
+    )
     if thinking or has_tools or first_is_system:
         out += "<|turn>system\n"
         if thinking:
@@ -151,30 +158,42 @@ def render_gemma(req: Value) raises -> String:
             out += format_gemma_tools(to.value())
         out += "<turn|>\n"
 
-    var prev_type = String("none")     # tracks ns.prev_message_type across turns
+    var prev_type = String("none")  # tracks ns.prev_message_type across turns
     var i = 1 if first_is_system else 0
     while i < n:
         var msg = M.c[].vals[i]
         var role = _role(msg)
         if role == "tool":
-            i += 1                      # consumed by a preceding assistant's scan
+            i += 1  # consumed by a preceding assistant's scan
             continue
 
         prev_type = "none"
         var label = String("model") if role == "assistant" else role
-        var continue_turn = (label == "model") and (_prev_non_tool_role(M, i) == "assistant")
+        var continue_turn = (label == "model") and (
+            _prev_non_tool_role(M, i) == "assistant"
+        )
         if not continue_turn:
             out += "<|turn>" + label + "\n"
 
         # assistant tool calls
         var tcs = msg.map_get("tool_calls")
-        var has_tc = Bool(tcs) and tcs.value().tag == VLIST and len(tcs.value().c[].vals) > 0
+        var has_tc = (
+            Bool(tcs)
+            and tcs.value().tag == VLIST
+            and len(tcs.value().c[].vals) > 0
+        )
         if has_tc:
             for j in range(len(tcs.value().c[].vals)):
                 var tc = tcs.value().c[].vals[j]
                 var func = tc.map_get("function").value()
                 var nm = func.map_get("name").value().s
-                out += "<|tool_call>call:" + nm + "{" + _tc_args(func) + "}<tool_call|>"
+                out += (
+                    "<|tool_call>call:"
+                    + nm
+                    + "{"
+                    + _tc_args(func)
+                    + "}<tool_call|>"
+                )
             prev_type = "tool_call"
 
         # tool results: forward-scan the consecutive role:tool messages

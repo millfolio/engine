@@ -8,8 +8,23 @@ argmax against HF (`pixi run forward-capture`). `pixi run test-forward`.
 from std.sys import has_accelerator
 from std.gpu.host import DeviceContext, DeviceBuffer
 
-from model import Weights, load_weights, embed_tokens, layer_cached, rmsnorm, mm, upload_ids
-from testio import read_text, read_f32, read_i32, max_abs, argmax_row, argmax_list
+from model import (
+    Weights,
+    load_weights,
+    embed_tokens,
+    layer_cached,
+    rmsnorm,
+    mm,
+    upload_ids,
+)
+from testio import (
+    read_text,
+    read_f32,
+    read_i32,
+    max_abs,
+    argmax_row,
+    argmax_list,
+)
 
 comptime H = 896
 comptime NKV = 128
@@ -63,7 +78,9 @@ def main() raises:
 
     var hn = rmsnorm(ctx, h, w.final_norm, T, H)
     ctx.synchronize()
-    print("  final_norm   max_abs=", max_abs(hn, read_f32(dir + "final_norm.bin")))
+    print(
+        "  final_norm   max_abs=", max_abs(hn, read_f32(dir + "final_norm.bin"))
+    )
 
     var logits = mm(ctx, hn, w.embed, dummy, T, H, VOCAB, 0)
     ctx.synchronize()
@@ -76,4 +93,9 @@ def main() raises:
 
     if not all_ok:
         raise Error("forward pass mismatch — gate FAILED")
-    print("OK — GPU forward matches HF per layer; greedy argmax agrees (", gpu_am, ")", sep="")
+    print(
+        "OK — GPU forward matches HF per layer; greedy argmax agrees (",
+        gpu_am,
+        ")",
+        sep="",
+    )

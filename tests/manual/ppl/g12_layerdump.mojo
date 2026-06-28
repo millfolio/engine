@@ -13,13 +13,15 @@ from layout import TileTensor, row_major
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--google--gemma-4-12B-it-qat-q4_0-unquantized/snapshots/58540658b6c08edab2ddc1fbde7f28cc9987ced3"
 
 
-def dump_mag(ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String) raises:
+def dump_mag(
+    ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String
+) raises:
     ctx.synchronize()
     var sumsq = Float64(0.0)
     var amax = Float64(0.0)
     with h.map_to_host() as m:
         var t = TileTensor(m, row_major(T * hd))
-        var base = (T - 1) * hd     # last row
+        var base = (T - 1) * hd  # last row
         for i in range(hd):
             var v = Float64(rebind[Scalar[DType.float32]](t[base + i]))
             sumsq += v * v
@@ -41,9 +43,35 @@ def main() raises:
     var cfg = gw.config()
     var hd = gw.hidden
 
-    var ids: List[Int] = [2, 818, 7578, 200258, 568, 1708, 834, 625, 795, 577,
-                          13139, 531, 8988, 529, 1515, 236768, 691, 1520, 44260,
-                          496, 544, 1488, 785, 4217, 531, 775, 236761]
+    var ids: List[Int] = [
+        2,
+        818,
+        7578,
+        200258,
+        568,
+        1708,
+        834,
+        625,
+        795,
+        577,
+        13139,
+        531,
+        8988,
+        529,
+        1515,
+        236768,
+        691,
+        1520,
+        44260,
+        496,
+        544,
+        1488,
+        785,
+        4217,
+        531,
+        775,
+        236761,
+    ]
     var T = len(ids)
     var s = new_session(ctx, 64, cfg.nlayers, cfg.nkv)
     var ids_dev = upload_ids(ctx, ids)
@@ -62,7 +90,7 @@ def main() raises:
     for i in range(len(lp)):
         nll += -Float64(lp[i])
     var mean = nll / Float64(len(lp))
-    print("G12 mean_nll=", mean, " PPL=", 2.718281828459045 ** mean)
+    print("G12 mean_nll=", mean, " PPL=", 2.718281828459045**mean)
     print("G12_LP=[null", end="")
     for i in range(len(lp)):
         print(",", lp[i], end="")

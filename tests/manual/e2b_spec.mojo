@@ -28,9 +28,18 @@ def _bytes(s: String) -> List[UInt8]:
     return b^
 
 
-def bench(ctx: DeviceContext, mut tgt: GemmaWeights, mut drf: GemmaE2bWeights,
-          tok: Tokenizer, tmpl: Template, label: String, body: String) raises:
-    var prompt = tok.encode(_bytes(render_value(tmpl, parse_json(body), FAMILY_GEMMA)))
+def bench(
+    ctx: DeviceContext,
+    mut tgt: GemmaWeights,
+    mut drf: GemmaE2bWeights,
+    tok: Tokenizer,
+    tmpl: Template,
+    label: String,
+    body: String,
+) raises:
+    var prompt = tok.encode(
+        _bytes(render_value(tmpl, parse_json(body), FAMILY_GEMMA))
+    )
     print("── ", label, " (prompt_toks=", len(prompt), ") ──", sep="")
 
     var t0 = perf_counter_ns()
@@ -46,15 +55,47 @@ def bench(ctx: DeviceContext, mut tgt: GemmaWeights, mut drf: GemmaE2bWeights,
     var diverge = -1
     for i in range(n):
         if base[i] != spec[i]:
-            ok = False; diverge = i; break
-    print("  baseline:   ", base_ms, " ms, ", len(base), " toks (",
-          Float64(len(base)) / (base_ms / 1000.0), " tok/s)", sep="")
-    print("  spec-draft: ", spec_ms, " ms, ", len(spec), " toks (",
-          Float64(len(spec)) / (spec_ms / 1000.0), " tok/s, ", base_ms / spec_ms, "x)", sep="")
+            ok = False
+            diverge = i
+            break
+    print(
+        "  baseline:   ",
+        base_ms,
+        " ms, ",
+        len(base),
+        " toks (",
+        Float64(len(base)) / (base_ms / 1000.0),
+        " tok/s)",
+        sep="",
+    )
+    print(
+        "  spec-draft: ",
+        spec_ms,
+        " ms, ",
+        len(spec),
+        " toks (",
+        Float64(len(spec)) / (spec_ms / 1000.0),
+        " tok/s, ",
+        base_ms / spec_ms,
+        "x)",
+        sep="",
+    )
     if not ok:
         if diverge >= 0:
-            print("  MISMATCH at ", diverge, ": base=", base[diverge], " spec=", spec[diverge], sep="")
-        raise Error("draft-model spec decode does NOT match greedy — FAILED (" + label + ")")
+            print(
+                "  MISMATCH at ",
+                diverge,
+                ": base=",
+                base[diverge],
+                " spec=",
+                spec[diverge],
+                sep="",
+            )
+        raise Error(
+            "draft-model spec decode does NOT match greedy — FAILED ("
+            + label
+            + ")"
+        )
     print("  OK — identical (", len(base), " toks)", sep="")
 
 
@@ -64,14 +105,45 @@ def main() raises:
     var tok = load_gemma_tokenizer_json(SNAPE2B + "/tokenizer.json")
     var tmpl = load_chat_template(TMPL)
     var t12 = List[Int]()
-    for i in range(G_NLAYERS): t12.append(i)
+    for i in range(G_NLAYERS):
+        t12.append(i)
     var tgt = load_gemma_weights(ctx, SNAP12B, t12, True)
     tgt.simd_ok = probe_simd_gemm(ctx)
     var drf = load_e2b_weights(ctx, SNAPE2B, True)
     drf.simd_ok = tgt.simd_ok
-    print("  target=12B (", G_NLAYERS, " layers)  draft=e2b (", E_NLAYERS, " layers)", sep="")
+    print(
+        "  target=12B (",
+        G_NLAYERS,
+        " layers)  draft=e2b (",
+        E_NLAYERS,
+        " layers)",
+        sep="",
+    )
 
-    bench(ctx, tgt, drf, tok, tmpl, "code-rewrite",
-        '{"messages":[{"role":"user","content":"Fix the bug in this Python function and return the complete corrected function, nothing else:\\n\\ndef factorial(n):\\n    result = 1\\n    for i in range(n):\\n        result = result * i\\n    return result\\n"}]}')
-    bench(ctx, tgt, drf, tok, tmpl, "prose",
-        '{"messages":[{"role":"user","content":"Explain in a few sentences why the sky is blue."}]}')
+    bench(
+        ctx,
+        tgt,
+        drf,
+        tok,
+        tmpl,
+        "code-rewrite",
+        (
+            '{"messages":[{"role":"user","content":"Fix the bug in this Python'
+            " function and return the complete corrected function, nothing"
+            " else:\\n\\ndef factorial(n):\\n    result = 1\\n    for i in"
+            " range(n):\\n        result = result * i\\n    return"
+            ' result\\n"}]}'
+        ),
+    )
+    bench(
+        ctx,
+        tgt,
+        drf,
+        tok,
+        tmpl,
+        "prose",
+        (
+            '{"messages":[{"role":"user","content":"Explain in a few sentences'
+            ' why the sky is blue."}]}'
+        ),
+    )

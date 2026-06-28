@@ -36,7 +36,8 @@ def fma_kernel(
 def main() raises:
     comptime if not has_accelerator():
         raise Error(
-            "no GPU accelerator detected — this is a GPU-only build (needs Metal)"
+            "no GPU accelerator detected — this is a GPU-only build (needs"
+            " Metal)"
         )
 
     var ctx = DeviceContext()
@@ -53,7 +54,10 @@ def main() raises:
     var c = TileTensor(c_buf, layout)
 
     ctx.enqueue_function[fma_kernel](
-        a, b, c, N,
+        a,
+        b,
+        c,
+        N,
         grid_dim=ceildiv(N, BLOCK),
         block_dim=BLOCK,
     )
@@ -77,4 +81,8 @@ def main() raises:
             + " elements wrong (expected 3.0)"
         )
 
-    print("OK — Mojo Metal kernel ran on the GPU; c = a*b+a == 3.0 for all", N, "elements")
+    print(
+        "OK — Mojo Metal kernel ran on the GPU; c = a*b+a == 3.0 for all",
+        N,
+        "elements",
+    )

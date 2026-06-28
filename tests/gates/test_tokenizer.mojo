@@ -16,6 +16,7 @@ def ids_equal(a: List[Int], b: List[Int]) -> Bool:
             return False
     return True
 
+
 def bytes_equal(a: List[UInt8], b: List[UInt8]) -> Bool:
     if len(a) != len(b):
         return False
@@ -23,6 +24,7 @@ def bytes_equal(a: List[UInt8], b: List[UInt8]) -> Bool:
         if a[i] != b[i]:
             return False
     return True
+
 
 def ids_str(a: List[Int]) -> String:
     var s = String("")
@@ -54,7 +56,20 @@ def main() raises:
         var dec_ok = bytes_equal(tok.decode(expected), buf)
 
         var tag = "OK" if (enc_ok and dec_ok) else "FAIL"
-        print("  p", i, ": encode=", enc_ok, " decode=", dec_ok, " (", len(expected), " toks) [", tag, "]", sep="")
+        print(
+            "  p",
+            i,
+            ": encode=",
+            enc_ok,
+            " decode=",
+            dec_ok,
+            " (",
+            len(expected),
+            " toks) [",
+            tag,
+            "]",
+            sep="",
+        )
         if not enc_ok:
             print("     expected:", ids_str(expected))
             print("     got:     ", ids_str(got))
@@ -62,4 +77,7 @@ def main() raises:
 
     if not all_ok:
         raise Error("tokenizer does NOT match transformers — gate FAILED")
-    print("OK — Mojo byte-level BPE matches transformers (encode + decode) on the corpus")
+    print(
+        "OK — Mojo byte-level BPE matches transformers (encode + decode) on the"
+        " corpus"
+    )

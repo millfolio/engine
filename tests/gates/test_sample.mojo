@@ -48,9 +48,26 @@ def main() raises:
         if worst > TOL:
             ok = False
         var tag = "OK" if ok else "FAIL"
-        print("  case ", ci, " (temp=", temp, " top_k=", top_k, " top_p=", top_p,
-              "): mojo kept ", len(dist.ids), " / hf ", len(exp_ids),
-              ", max prob diff=", worst, " [", tag, "]", sep="")
+        print(
+            "  case ",
+            ci,
+            " (temp=",
+            temp,
+            " top_k=",
+            top_k,
+            " top_p=",
+            top_p,
+            "): mojo kept ",
+            len(dist.ids),
+            " / hf ",
+            len(exp_ids),
+            ", max prob diff=",
+            worst,
+            " [",
+            tag,
+            "]",
+            sep="",
+        )
         all_ok = all_ok and ok
 
     if not all_ok:

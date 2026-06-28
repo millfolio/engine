@@ -62,4 +62,7 @@ def main() raises:
 
     if not all_ok:
         raise Error("safetensors loader does NOT match torch — gate FAILED")
-    print("OK — Mojo safetensors parse + bf16→f32 match torch (first-8 of each tensor)")
+    print(
+        "OK — Mojo safetensors parse + bf16→f32 match torch (first-8 of each"
+        " tensor)"
+    )

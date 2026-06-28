@@ -24,8 +24,15 @@ from std.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
 from model import (
-    Weights, WBuf, load_weights, new_session, sess_prefill, sess_step,
-    argmax_f, EOS1, EOS2,
+    Weights,
+    WBuf,
+    load_weights,
+    new_session,
+    sess_prefill,
+    sess_step,
+    argmax_f,
+    EOS1,
+    EOS2,
 )
 from kernels import bf16_widen
 from tokenizer import load_tokenizer
@@ -39,6 +46,7 @@ comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"
 def read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
+
 
 def to_bytes(s: String) -> List[UInt8]:
     var out = List[UInt8]()
@@ -57,7 +65,9 @@ def f32_to_bf16(f: Float32) -> Scalar[DType.uint16]:
     return Scalar[DType.uint16]((r >> 16) & 0xFFFF)
 
 
-def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int) raises -> Float64:
+def fakequant_rows(
+    ctx: DeviceContext, mut w: WBuf, N: Int, K: Int
+) raises -> Float64:
     """In-place per-row (output-channel) symmetric int8 RTN round-trip. Returns
     mean relative L2 reconstruction error across rows."""
     var rel_sum = 0.0
@@ -80,7 +90,7 @@ def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int) raises -> Fl
             var den = Float64(0.0)
             for k in range(K):
                 var v = bf16_widen(rebind[Scalar[DType.uint16]](t[base + k]))
-                var q = (v * inv)
+                var q = v * inv
                 # round-to-nearest, clamp to int8 symmetric range
                 var half = Float32(0.5) if q >= 0.0 else Float32(-0.5)
                 var qr = Float32(Int(q + half))
@@ -99,7 +109,9 @@ def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int) raises -> Fl
     return rel_sum / Float64(rows) if rows > 0 else 0.0
 
 
-def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tuple[Float64, Int, Int]:
+def kl_and_top1(
+    p_logits: List[Float32], q_logits: List[Float32]
+) raises -> Tuple[Float64, Int, Int]:
     """KL(softmax(p) || softmax(q)) in nats, plus argmax of each."""
     var n = len(p_logits)
     var pmax = Float32(-1.0e30)
@@ -108,9 +120,11 @@ def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tupl
     var qi = 0
     for i in range(n):
         if p_logits[i] > pmax:
-            pmax = p_logits[i]; pi = i
+            pmax = p_logits[i]
+            pi = i
         if q_logits[i] > qmax:
-            qmax = q_logits[i]; qi = i
+            qmax = q_logits[i]
+            qi = i
     var pz = Float64(0.0)
     var qz = Float64(0.0)
     for i in range(n):
@@ -120,11 +134,11 @@ def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tupl
     var logqz = log(qz)
     var kl = Float64(0.0)
     for i in range(n):
-        var lp = Float64(p_logits[i] - pmax) - logpz   # log p_i
+        var lp = Float64(p_logits[i] - pmax) - logpz  # log p_i
         var p = exp(lp)
         if p <= 1.0e-12:
             continue
-        var lq = Float64(q_logits[i] - qmax) - logqz   # log q_i
+        var lq = Float64(q_logits[i] - qmax) - logqz  # log q_i
         kl += p * (lp - lq)
     return (kl, pi, qi)
 
@@ -132,9 +146,16 @@ def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tupl
 def main() raises:
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
-        ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
+        ckpt = String(
+            String(
+                read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
+            ).strip()
+        )
 
-    var user = String("Explain how a hash map works and why lookups are fast. Then write a short Python example.")
+    var user = String(
+        "Explain how a hash map works and why lookups are fast. Then write a"
+        " short Python example."
+    )
     var tok = load_tokenizer("tests/fixtures/tokenizer/")
     var tmpl = load_chat_template(TEMPLATE)
     var ids = tok.encode(to_bytes(render_chat(tmpl, user)))
@@ -163,8 +184,13 @@ def main() raises:
     # ---- fake-quantize all bf16 weight matrices in place ----
     print("quantizing weights (per-channel int8 RTN)…")
     var e_embed = fakequant_rows(ctx, w.embed, w.vocab, w.hidden)
-    var e_qw = 0.0; var e_kw = 0.0; var e_vw = 0.0; var e_ow = 0.0
-    var e_gate = 0.0; var e_up = 0.0; var e_down = 0.0
+    var e_qw = 0.0
+    var e_kw = 0.0
+    var e_vw = 0.0
+    var e_ow = 0.0
+    var e_gate = 0.0
+    var e_up = 0.0
+    var e_down = 0.0
     for l in range(w.nlayers):
         e_qw += fakequant_rows(ctx, w.qw[l], w.hidden, w.hidden)
         e_kw += fakequant_rows(ctx, w.kw[l], w.nkv, w.hidden)
@@ -176,7 +202,16 @@ def main() raises:
     var nl = Float64(w.nlayers)
     print("  rel-L2 recon error (mean over rows):")
     print("    embed/lmhead:", e_embed)
-    print("    q_proj:", e_qw / nl, "  k_proj:", e_kw / nl, "  v_proj:", e_vw / nl, "  o_proj:", e_ow / nl)
+    print(
+        "    q_proj:",
+        e_qw / nl,
+        "  k_proj:",
+        e_kw / nl,
+        "  v_proj:",
+        e_vw / nl,
+        "  o_proj:",
+        e_ow / nl,
+    )
     print("    gate:", e_gate / nl, "  up:", e_up / nl, "  down:", e_down / nl)
 
     # ---- teacher-forced drift: feed bf16 tokens, compare distributions ----
@@ -192,8 +227,15 @@ def main() raises:
             top1_match += 1
         if t + 1 < nsteps:
             lg2 = sess_step(ctx, w, s2, ref_tokens[t])
-    print("  top-1 agreement:", top1_match, "/", nsteps,
-          "(", Float64(top1_match) / Float64(nsteps) * 100.0, "%)")
+    print(
+        "  top-1 agreement:",
+        top1_match,
+        "/",
+        nsteps,
+        "(",
+        Float64(top1_match) / Float64(nsteps) * 100.0,
+        "%)",
+    )
     print("  mean KL(bf16||int8):", kl_sum / Float64(nsteps), "nats")
 
     # ---- free-running int8 greedy: divergence index + decoded text ----

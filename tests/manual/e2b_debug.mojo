@@ -12,7 +12,9 @@ from runtime.tensor_ops import probe_simd_gemm
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
 
 
-def dump(ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String) raises:
+def dump(
+    ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String
+) raises:
     ctx.synchronize()
     with h.map_to_host() as m:
         var t = TileTensor(m, row_major(T * hd))
@@ -30,7 +32,7 @@ def dump(ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String) rais
 def main() raises:
     var ctx = DeviceContext()
     print("loading e2b bf16…")
-    var gw = load_e2b_weights(ctx, SNAP, False)   # bf16 for exact compare
+    var gw = load_e2b_weights(ctx, SNAP, False)  # bf16 for exact compare
     gw.simd_ok = probe_simd_gemm(ctx)
     var cfg = gw.config()
     var hd = gw.hidden

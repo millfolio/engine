@@ -28,16 +28,24 @@ from std.collections import InlineArray
 from std.memory import stack_allocation
 from std.sys.info import external_call
 from layout import TileTensor, TensorLayout, row_major
-from kernels import matmul_kernel, matmul_q4_batch_kernel, matmul_q4_small_kernel, _SM_BN, _SM_TPB
+from kernels import (
+    matmul_kernel,
+    matmul_q4_batch_kernel,
+    matmul_q4_small_kernel,
+    _SM_BN,
+    _SM_TPB,
+)
 
 comptime Q4_GROUP = 128
-comptime Q4_SHIFT = 7                                          # log2(128)
+comptime Q4_SHIFT = 7  # log2(128)
 comptime BLOCK = 256
 
 comptime _FRAG = SIMD[DType.float32, 64]
 comptime _V2 = SIMD[DType.int64, 2]
 comptime _LD = "air.simdgroup_matrix_8x8_load.v64f32.p3f32"
-comptime _MAC = "air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32"
+comptime _MAC = (
+    "air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32"
+)
 comptime _ST = "air.simdgroup_matrix_8x8_store.v64f32.p3f32"
 comptime SG_BM = 32
 comptime SG_BN = 32
@@ -46,10 +54,15 @@ comptime SG_TPB = 128
 
 
 @always_inline
-def q4_deq[LT: TensorLayout](
+def q4_deq[
+    LT: TensorLayout
+](
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
-    n: Int, k: Int, K: Int, NG: Int,
+    n: Int,
+    k: Int,
+    K: Int,
+    NG: Int,
 ) -> Float32:
     """Dequant a single weight (n,k) — used by the prefill GEMM staging."""
     comptime assert P.flat_rank == 1
@@ -60,13 +73,19 @@ def q4_deq[LT: TensorLayout](
     return Float32(nib - 8) * s
 
 
-def q4_gemv_kernel[LT: TensorLayout](
+def q4_gemv_kernel[
+    LT: TensorLayout
+](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """Vectorized decode GEMV: one warp per output, each lane consumes one u32
     (8 weights) per step → coalesced 128-byte loads, scale folded per word."""
@@ -100,13 +119,19 @@ def q4_gemv_kernel[LT: TensorLayout](
         Y[m * N + n] = rebind[Y.ElementType](total)
 
 
-def q4_simd_kernel[LT: TensorLayout](
+def q4_simd_kernel[
+    LT: TensorLayout
+](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """matmul_simd_kernel with int4-dequant W-staging; matmul math identical."""
     comptime assert X.flat_rank == 1
@@ -115,9 +140,15 @@ def q4_simd_kernel[LT: TensorLayout](
     var m0 = Int(block_idx.y) * SG_BM
     var n0 = Int(block_idx.x) * SG_BN
 
-    var sA = stack_allocation[SG_BM * 8, Float32, address_space = AddressSpace.SHARED]()
-    var sB = stack_allocation[8 * SG_BN, Float32, address_space = AddressSpace.SHARED]()
-    var sC = stack_allocation[SG_BM * SG_BN, Float32, address_space = AddressSpace.SHARED]()
+    var sA = stack_allocation[
+        SG_BM * 8, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var sB = stack_allocation[
+        8 * SG_BN, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var sC = stack_allocation[
+        SG_BM * SG_BN, Float32, address_space=AddressSpace.SHARED
+    ]()
 
     var dims = _V2(8, 8)
     var lay8 = _V2(1, 8)
@@ -156,7 +187,9 @@ def q4_simd_kernel[LT: TensorLayout](
         kt += 8
 
     for ct in range(SG_NCT):
-        external_call[_ST, NoneType](acc[ct], sC + sg * 8 * SG_BN + ct * 8, dims, layN, origin)
+        external_call[_ST, NoneType](
+            acc[ct], sC + sg * 8 * SG_BN + ct * 8, dims, layN, origin
+        )
     barrier()
     for j in range(SG_BM * SG_BN // SG_TPB):
         var c = Int(tid) + SG_TPB * j
@@ -173,15 +206,19 @@ def q4_simd_kernel[LT: TensorLayout](
 
 # ── host helpers ──────────────────────────────────────────────────────────────
 
+
 def prng(mut state: UInt64) -> Float32:
     state ^= state << 13
     state ^= state >> 7
     state ^= state << 17
-    return Float32(Int(state % 2000) - 1000) / 1000.0          # ~[-1,1]
+    return Float32(Int(state % 2000) - 1000) / 1000.0  # ~[-1,1]
 
 
-def quantize_g128(W: List[Float32], N: Int, K: Int) raises -> Tuple[List[UInt32], List[Float32], List[Float32]]:
-    """Returns (packed u32[N*K/8], scales f32[N*NG], dequant-reference f32[N*K])."""
+def quantize_g128(
+    W: List[Float32], N: Int, K: Int
+) raises -> Tuple[List[UInt32], List[Float32], List[Float32]]:
+    """Returns (packed u32[N*K/8], scales f32[N*NG], dequant-reference f32[N*K]).
+    """
     var NG = K // Q4_GROUP
     var packed = List[UInt32]()
     for _ in range(N * K // 8):
@@ -214,7 +251,9 @@ def quantize_g128(W: List[Float32], N: Int, K: Int) raises -> Tuple[List[UInt32]
                     qr = -7
                 deq[n * K + k] = Float32(qr) * s
                 var lin = n * K + k
-                packed[lin >> 3] = packed[lin >> 3] | (UInt32(qr + 8) << UInt32((lin & 7) * 4))
+                packed[lin >> 3] = packed[lin >> 3] | (
+                    UInt32(qr + 8) << UInt32((lin & 7) * 4)
+                )
     return (packed^, scales^, deq^)
 
 
@@ -235,7 +274,9 @@ def maxabs_err(a: List[Float32], b: List[Float32]) -> Tuple[Float64, Float64]:
     return (md, mr)
 
 
-def check(ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int) raises:
+def check(
+    ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int
+) raises:
     # mode: 0 = local decode GEMV, 1 = local simd GEMM, 2 = library batched GEMV
     var NG = K // Q4_GROUP
     var seed = UInt64(0x1234567 + M * 7 + N * 13 + K)
@@ -243,7 +284,7 @@ def check(ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int) r
     for _ in range(N * K):
         Wh.append(prng(seed))
     for n in range(N):
-        Wh[n * K + (n * 37) % K] = Float32(6.0)                # outliers
+        Wh[n * K + (n * 37) % K] = Float32(6.0)  # outliers
     var Xh = List[Float32]()
     for _ in range(M * K):
         Xh.append(prng(seed))
@@ -252,7 +293,9 @@ def check(ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int) r
         Bh.append(prng(seed))
 
     var qz = quantize_g128(Wh, N, K)
-    var packed = qz[0].copy(); var scales = qz[1].copy(); var deq = qz[2].copy()
+    var packed = qz[0].copy()
+    var scales = qz[1].copy()
+    var deq = qz[2].copy()
 
     var cpuref = List[Float32]()
     for m in range(M):
@@ -292,20 +335,68 @@ def check(ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int) r
 
     if mode == 1:
         comptime k = q4_simd_kernel[type_of(row_major(1))]
-        ctx.enqueue_function[k](xt, pt, st, bt, yt, M, K, N, NG, 1,
-            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)), block_dim=SG_TPB)
+        ctx.enqueue_function[k](
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            M,
+            K,
+            N,
+            NG,
+            1,
+            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+            block_dim=SG_TPB,
+        )
     elif mode == 2:
         comptime k = matmul_q4_batch_kernel[type_of(row_major(1))]
-        ctx.enqueue_function[k](xt, pt, st, bt, yt, M, K, N, NG, 1,
-            grid_dim=ceildiv(N * WARP_SIZE, BLOCK), block_dim=BLOCK)
+        ctx.enqueue_function[k](
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            M,
+            K,
+            N,
+            NG,
+            1,
+            grid_dim=ceildiv(N * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
     elif mode == 3:
         comptime k = matmul_q4_small_kernel[type_of(row_major(1))]
-        ctx.enqueue_function[k](xt, pt, st, bt, yt, M, K, N, NG, 1,
-            grid_dim=(ceildiv(N, _SM_BN), 1), block_dim=_SM_TPB)
+        ctx.enqueue_function[k](
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            M,
+            K,
+            N,
+            NG,
+            1,
+            grid_dim=(ceildiv(N, _SM_BN), 1),
+            block_dim=_SM_TPB,
+        )
     else:
         comptime k = q4_gemv_kernel[type_of(row_major(1))]
-        ctx.enqueue_function[k](xt, pt, st, bt, yt, M, K, N, NG, 1,
-            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK), block_dim=BLOCK)
+        ctx.enqueue_function[k](
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            M,
+            K,
+            N,
+            NG,
+            1,
+            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
     ctx.synchronize()
 
     var got = List[Float32]()
@@ -315,8 +406,23 @@ def check(ctx: DeviceContext, name: String, M: Int, K: Int, N: Int, mode: Int) r
             got.append(rebind[Scalar[DType.float32]](t[i]))
     var e = maxabs_err(got, cpuref)
     var rel = e[0] / e[1] if e[1] > 0 else e[0]
-    print("  ", name, " M=", M, " K=", K, " N=", N, " : max|Δ|=", e[0], " rel=", rel,
-          " ", "OK" if rel < 1.0e-3 else "FAIL", sep="")
+    print(
+        "  ",
+        name,
+        " M=",
+        M,
+        " K=",
+        K,
+        " N=",
+        N,
+        " : max|Δ|=",
+        e[0],
+        " rel=",
+        rel,
+        " ",
+        "OK" if rel < 1.0e-3 else "FAIL",
+        sep="",
+    )
 
 
 def bench_speed(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
@@ -329,37 +435,62 @@ def bench_speed(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
     var wb = ctx.enqueue_create_buffer[DType.uint16](N * K)
     var bb = ctx.enqueue_create_buffer[DType.float32](1)
     var yb = ctx.enqueue_create_buffer[DType.float32](M * N)
-    xb.enqueue_fill(0.5); wb.enqueue_fill(0x3F80); yb.enqueue_fill(0.0)
+    xb.enqueue_fill(0.5)
+    wb.enqueue_fill(0x3F80)
+    yb.enqueue_fill(0.0)
     var xt = TileTensor(xb, row_major(M * K))
     var wt = TileTensor(wb, row_major(N * K))
     var bt = TileTensor(bb, row_major(1))
     var yt = TileTensor(yb, row_major(M * N))
     comptime kb = matmul_kernel[type_of(row_major(1))]
     for _ in range(5):
-        ctx.enqueue_function[kb](xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK)
+        ctx.enqueue_function[kb](
+            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+        )
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
-        ctx.enqueue_function[kb](xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK)
+        ctx.enqueue_function[kb](
+            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+        )
     ctx.synchronize()
     var bf_ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
 
     var pb = ctx.enqueue_create_buffer[DType.uint32](N * K // 8)
     var sb = ctx.enqueue_create_buffer[DType.float32](N * NG)
-    pb.enqueue_fill(0x99999999); sb.enqueue_fill(0.01)
+    pb.enqueue_fill(0x99999999)
+    sb.enqueue_fill(0.01)
     var pt = TileTensor(pb, row_major(N * K // 8))
     var st = TileTensor(sb, row_major(N * NG))
     comptime kq = q4_gemv_kernel[type_of(row_major(1))]
     for _ in range(5):
-        ctx.enqueue_function[kq](xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK)
+        ctx.enqueue_function[kq](
+            xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK
+        )
     ctx.synchronize()
     var t1 = perf_counter_ns()
     for _ in range(iters):
-        ctx.enqueue_function[kq](xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK)
+        ctx.enqueue_function[kq](
+            xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK
+        )
     ctx.synchronize()
     var q_ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
-    print("  ", name, " K=", K, " N=", N, " : bf16 ", bf_ms, " ms  q4 ", q_ms,
-          " ms  speedup ", bf_ms / q_ms, "x", sep="")
+    print(
+        "  ",
+        name,
+        " K=",
+        K,
+        " N=",
+        N,
+        " : bf16 ",
+        bf_ms,
+        " ms  q4 ",
+        q_ms,
+        " ms  speedup ",
+        bf_ms / q_ms,
+        "x",
+        sep="",
+    )
 
 
 def main() raises:
@@ -387,7 +518,7 @@ def main() raises:
     check(ctx, "small", 5, 896, 137, 3)
     check(ctx, "small", 8, 2048, 320, 3)
     check(ctx, "small", 4, 11008, 256, 3)
-    check(ctx, "small", 8, 2048, 130, 3)   # N not a multiple of _SM_BN
+    check(ctx, "small", 8, 2048, 130, 3)  # N not a multiple of _SM_BN
 
     print("\n=== decode GEMV speed: bf16 vs int4 g128 (M=1, 3B shapes) ===")
     bench_speed(ctx, "q/o  ", 2048, 2048)

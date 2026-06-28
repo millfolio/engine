@@ -19,8 +19,15 @@ from std.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
 from model import (
-    Weights, WBuf, load_weights, new_session, sess_prefill, sess_step,
-    argmax_f, EOS1, EOS2,
+    Weights,
+    WBuf,
+    load_weights,
+    new_session,
+    sess_prefill,
+    sess_step,
+    argmax_f,
+    EOS1,
+    EOS2,
 )
 from kernels import bf16_widen
 from tokenizer import load_tokenizer, Tokenizer
@@ -34,6 +41,7 @@ comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"
 def read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
+
 
 def to_bytes(s: String) -> List[UInt8]:
     var out = List[UInt8]()
@@ -51,12 +59,13 @@ def f32_to_bf16(f: Float32) -> Scalar[DType.uint16]:
     return Scalar[DType.uint16]((r >> 16) & 0xFFFF)
 
 
-def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int,
-                   bits: Int, group: Int) raises -> Float64:
+def fakequant_rows(
+    ctx: DeviceContext, mut w: WBuf, N: Int, K: Int, bits: Int, group: Int
+) raises -> Float64:
     """In-place symmetric RTN round-trip with `bits` precision and `group`-sized
     blocks within each row (group<=0 or >=K means per-channel). Returns mean
     relative L2 reconstruction error across rows."""
-    var qmax = Float32((1 << (bits - 1)) - 1)            # int8->127, int4->7
+    var qmax = Float32((1 << (bits - 1)) - 1)  # int8->127, int4->7
     var g = K if (group <= 0 or group > K) else group
     var rel_sum = 0.0
     var rows = 0
@@ -73,7 +82,9 @@ def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int,
                     gend = K
                 var amax = Float32(0.0)
                 for k in range(gstart, gend):
-                    var v = bf16_widen(rebind[Scalar[DType.uint16]](t[base + k]))
+                    var v = bf16_widen(
+                        rebind[Scalar[DType.uint16]](t[base + k])
+                    )
                     var a = v if v >= 0.0 else -v
                     if a > amax:
                         amax = a
@@ -81,7 +92,9 @@ def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int,
                     var scale = amax / qmax
                     var inv = 1.0 / scale
                     for k in range(gstart, gend):
-                        var v = bf16_widen(rebind[Scalar[DType.uint16]](t[base + k]))
+                        var v = bf16_widen(
+                            rebind[Scalar[DType.uint16]](t[base + k])
+                        )
                         var q = v * inv
                         var half = Float32(0.5) if q >= 0.0 else Float32(-0.5)
                         var qr = Float32(Int(q + half))
@@ -101,20 +114,28 @@ def fakequant_rows(ctx: DeviceContext, mut w: WBuf, N: Int, K: Int,
     return rel_sum / Float64(rows) if rows > 0 else 0.0
 
 
-def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tuple[Float64, Int, Int]:
+def kl_and_top1(
+    p_logits: List[Float32], q_logits: List[Float32]
+) raises -> Tuple[Float64, Int, Int]:
     var n = len(p_logits)
-    var pmax = Float32(-1.0e30); var qmax = Float32(-1.0e30)
-    var pi = 0; var qi = 0
+    var pmax = Float32(-1.0e30)
+    var qmax = Float32(-1.0e30)
+    var pi = 0
+    var qi = 0
     for i in range(n):
         if p_logits[i] > pmax:
-            pmax = p_logits[i]; pi = i
+            pmax = p_logits[i]
+            pi = i
         if q_logits[i] > qmax:
-            qmax = q_logits[i]; qi = i
-    var pz = Float64(0.0); var qz = Float64(0.0)
+            qmax = q_logits[i]
+            qi = i
+    var pz = Float64(0.0)
+    var qz = Float64(0.0)
     for i in range(n):
         pz += exp(Float64(p_logits[i] - pmax))
         qz += exp(Float64(q_logits[i] - qmax))
-    var logpz = log(pz); var logqz = log(qz)
+    var logpz = log(pz)
+    var logqz = log(qz)
     var kl = Float64(0.0)
     for i in range(n):
         var lp = Float64(p_logits[i] - pmax) - logpz
@@ -126,22 +147,36 @@ def kl_and_top1(p_logits: List[Float32], q_logits: List[Float32]) raises -> Tupl
     return (kl, pi, qi)
 
 
-def eval_scheme(ctx: DeviceContext, ckpt: String, label: String, bits: Int, group: Int,
-                ids: List[Int], ref_tokens: List[Int], ref_logits: List[List[Float32]],
-                mut tok: Tokenizer) raises:
+def eval_scheme(
+    ctx: DeviceContext,
+    ckpt: String,
+    label: String,
+    bits: Int,
+    group: Int,
+    ids: List[Int],
+    ref_tokens: List[Int],
+    ref_logits: List[List[Float32]],
+    mut tok: Tokenizer,
+) raises:
     # load bf16 (q4=False) — projection weights are QMat-wrapped bf16; .bf16 gets
     # the underlying buffer this fake-quant gate mutates in place.
     var w = load_weights(ctx, ckpt)
     var qkvN = w.hidden + 2 * w.nkv
     var e_q = fakequant_rows(ctx, w.qkv[0].bf16, qkvN, w.hidden, bits, group)
-    var e_down = fakequant_rows(ctx, w.down[0].bf16, w.hidden, w.inter, bits, group)
+    var e_down = fakequant_rows(
+        ctx, w.down[0].bf16, w.hidden, w.inter, bits, group
+    )
     _ = fakequant_rows(ctx, w.embed, w.vocab, w.hidden, bits, group)
     for l in range(w.nlayers):
         if l != 0:
             _ = fakequant_rows(ctx, w.qkv[l].bf16, qkvN, w.hidden, bits, group)
-            _ = fakequant_rows(ctx, w.down[l].bf16, w.hidden, w.inter, bits, group)
+            _ = fakequant_rows(
+                ctx, w.down[l].bf16, w.hidden, w.inter, bits, group
+            )
         _ = fakequant_rows(ctx, w.ow[l].bf16, w.hidden, w.hidden, bits, group)
-        _ = fakequant_rows(ctx, w.gate_up[l].bf16, 2 * w.inter, w.hidden, bits, group)
+        _ = fakequant_rows(
+            ctx, w.gate_up[l].bf16, 2 * w.inter, w.hidden, bits, group
+        )
 
     var nsteps = len(ref_tokens)
     var s2 = new_session(ctx, len(ids) + MAX_NEW + 2, w.nlayers, w.nkv)
@@ -169,7 +204,8 @@ def eval_scheme(ctx: DeviceContext, ckpt: String, label: String, bits: Int, grou
     var lim = nsteps if nsteps < len(qtok) else len(qtok)
     for t in range(lim):
         if ref_tokens[t] != qtok[t]:
-            diverge = t; break
+            diverge = t
+            break
 
     var body = List[Int]()
     for i in range(len(qtok)):
@@ -180,8 +216,17 @@ def eval_scheme(ctx: DeviceContext, ckpt: String, label: String, bits: Int, grou
     var gtxt = group if group > 0 else 0
     print("── ", label, " (bits=", bits, " group=", gtxt, ") ──", sep="")
     print("   recon rel-L2: q_proj=", e_q, "  down_proj=", e_down)
-    print("   top-1: ", top1, "/", nsteps, " (", Float64(top1) / Float64(nsteps) * 100.0,
-          "%)   mean KL=", kl_sum / Float64(nsteps), " nats")
+    print(
+        "   top-1: ",
+        top1,
+        "/",
+        nsteps,
+        " (",
+        Float64(top1) / Float64(nsteps) * 100.0,
+        "%)   mean KL=",
+        kl_sum / Float64(nsteps),
+        " nats",
+    )
     if diverge < 0:
         print("   greedy IDENTICAL through ", lim, " tokens")
     else:
@@ -192,9 +237,16 @@ def eval_scheme(ctx: DeviceContext, ckpt: String, label: String, bits: Int, grou
 def main() raises:
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
-        ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
+        ckpt = String(
+            String(
+                read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
+            ).strip()
+        )
 
-    var user = String("Explain how a hash map works and why lookups are fast. Then write a short Python example.")
+    var user = String(
+        "Explain how a hash map works and why lookups are fast. Then write a"
+        " short Python example."
+    )
     var tok = load_tokenizer("tests/fixtures/tokenizer/")
     var tmpl = load_chat_template(TEMPLATE)
     var ids = tok.encode(to_bytes(render_chat(tmpl, user)))
@@ -209,11 +261,13 @@ def main() raises:
     var ref_logits = List[List[Float32]]()
     var lg = sess_prefill(ctx, w, s, ids)
     var nxt = argmax_f(lg)
-    ref_logits.append(lg.copy()); ref_tokens.append(nxt)
+    ref_logits.append(lg.copy())
+    ref_tokens.append(nxt)
     while len(ref_tokens) < MAX_NEW and nxt != EOS1 and nxt != EOS2:
         lg = sess_step(ctx, w, s, nxt)
         nxt = argmax_f(lg)
-        ref_logits.append(lg.copy()); ref_tokens.append(nxt)
+        ref_logits.append(lg.copy())
+        ref_tokens.append(nxt)
     print("  bf16 produced", len(ref_tokens), "tokens\n")
 
     var ref_body = List[Int]()
@@ -224,7 +278,15 @@ def main() raises:
     print(">>> ", user, sep="")
     print("bf16: ", bytes_to_string(tok.decode(ref_body)), "\n", sep="")
 
-    eval_scheme(ctx, ckpt, "int8 per-channel", 8, 0, ids, ref_tokens, ref_logits, tok)
-    eval_scheme(ctx, ckpt, "int4 per-channel", 4, 0, ids, ref_tokens, ref_logits, tok)
-    eval_scheme(ctx, ckpt, "int4 group-128", 4, 128, ids, ref_tokens, ref_logits, tok)
-    eval_scheme(ctx, ckpt, "int4 group-64", 4, 64, ids, ref_tokens, ref_logits, tok)
+    eval_scheme(
+        ctx, ckpt, "int8 per-channel", 8, 0, ids, ref_tokens, ref_logits, tok
+    )
+    eval_scheme(
+        ctx, ckpt, "int4 per-channel", 4, 0, ids, ref_tokens, ref_logits, tok
+    )
+    eval_scheme(
+        ctx, ckpt, "int4 group-128", 4, 128, ids, ref_tokens, ref_logits, tok
+    )
+    eval_scheme(
+        ctx, ckpt, "int4 group-64", 4, 64, ids, ref_tokens, ref_logits, tok
+    )

@@ -21,7 +21,12 @@ def main() raises:
     # listen(), exactly like HttpServer.bind() does in server.mojo's main().
     var lis = TcpListener.bind(SocketAddr.localhost(0))
     var port = lis.local_addr().port
-    print("  bound a listener on 127.0.0.1:", port, " (never accept()/serve() below)", sep="")
+    print(
+        "  bound a listener on 127.0.0.1:",
+        port,
+        " (never accept()/serve() below)",
+        sep="",
+    )
 
     # No accept()/serve() is ever called — yet clients can connect, because the
     # kernel completes the handshake into the listen backlog. Queue several to show
@@ -32,14 +37,21 @@ def main() raises:
         try:
             var s = TcpStream.connect(lis.local_addr())
             n_ok += 1
-            _ = s^  # close immediately; the connection was already accepted by the kernel
+            _ = (
+                s^
+            )  # close immediately; the connection was already accepted by the kernel
         except e:
             if i == 0:
                 print("  (connect error: ", e, ")", sep="")
         i += 1
     var connects_ok = n_ok == 4
-    print("[" + ("PASS" if connects_ok else "FAIL") + "] " + String(n_ok)
-          + "/4 clients connect to a bound, not-yet-serving listener")
+    print(
+        "["
+        + ("PASS" if connects_ok else "FAIL")
+        + "] "
+        + String(n_ok)
+        + "/4 clients connect to a bound, not-yet-serving listener"
+    )
     all_ok = all_ok and connects_ok
 
     print()
@@ -47,4 +59,6 @@ def main() raises:
         print("ALL CHECKS PASSED")
     else:
         print("CHECKS FAILED")
-        raise Error("test-server-bind: a connection to a bound listener was refused")
+        raise Error(
+            "test-server-bind: a connection to a bound listener was refused"
+        )

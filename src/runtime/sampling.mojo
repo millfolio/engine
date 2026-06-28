@@ -11,8 +11,14 @@ struct Dist(Movable):
     var probs: List[Float32]
 
 
-def process_logits(logits: List[Float32], context: List[Int], temp: Float32,
-                   top_k: Int, top_p: Float32, rep_pen: Float32) raises -> Dist:
+def process_logits(
+    logits: List[Float32],
+    context: List[Int],
+    temp: Float32,
+    top_k: Int,
+    top_p: Float32,
+    rep_pen: Float32,
+) raises -> Dist:
     """HF order: repetition_penalty → temperature → top_k → top_p → softmax.
     Returns the kept token ids and their (renormalized) probabilities."""
     var v = logits.copy()
@@ -88,7 +94,9 @@ def next_rand(mut state: UInt64) -> UInt64:
 
 
 def sample(dist: Dist, mut rng: UInt64) -> Int:
-    var r = Float32(Int(next_rand(rng) >> UInt64(40))) / Float32(1 << 24)  # [0,1)
+    var r = Float32(Int(next_rand(rng) >> UInt64(40))) / Float32(
+        1 << 24
+    )  # [0,1)
     var cum = Float32(0.0)
     for i in range(len(dist.ids)):
         cum += dist.probs[i]

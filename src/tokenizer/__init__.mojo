@@ -16,24 +16,28 @@ Two loaders build the same `Tokenizer`:
 
 from json import parse_json
 
-comptime MUL = 1 << 20         # pair key = left*MUL + right (ids < 262144 for Gemma,
-                               # < 151936 for Qwen; 1<<20 == 1048576 exceeds both)
+comptime MUL = 1 << 20  # pair key = left*MUL + right (ids < 262144 for Gemma,
+# < 151936 for Qwen; 1<<20 == 1048576 exceeds both)
 comptime APOS = 39
 comptime SPACE = 32
-comptime USCORE = 0x2581       # U+2581 "▁" — Gemma's normalized-space marker
+comptime USCORE = 0x2581  # U+2581 "▁" — Gemma's normalized-space marker
 
 
 def is_letter(b: Int) -> Bool:
     return (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
 
+
 def is_digit(b: Int) -> Bool:
     return b >= 48 and b <= 57
+
 
 def is_space(b: Int) -> Bool:
     return b == 32 or b == 9 or b == 10 or b == 13 or b == 11 or b == 12
 
+
 def is_nl(b: Int) -> Bool:
     return b == 10 or b == 13
+
 
 def lower(b: Int) -> Int:
     return b + 32 if (b >= 65 and b <= 90) else b
@@ -47,14 +51,14 @@ struct SpMatch(Copyable, Movable):
 
 @fieldwise_init
 struct Tokenizer(Movable):
-    var byte_id: List[Int]                 # [256] id of each single-byte token
-    var merge_rank: Dict[Int, Int]         # pairkey -> rank
-    var merge_id: Dict[Int, Int]           # pairkey -> merged id
+    var byte_id: List[Int]  # [256] id of each single-byte token
+    var merge_rank: Dict[Int, Int]  # pairkey -> rank
+    var merge_id: Dict[Int, Int]  # pairkey -> merged id
     var id_to_bytes: Dict[Int, List[UInt8]]
-    var sp_text: List[List[UInt8]]         # special token texts
-    var sp_id: List[Int]                   # parallel ids
-    var cp_to_id: Dict[Int, Int]           # codepoint -> id (Gemma single-char symbols)
-    var gemma: Bool                        # True -> SentencePiece-style path (no GPT2 regex)
+    var sp_text: List[List[UInt8]]  # special token texts
+    var sp_id: List[Int]  # parallel ids
+    var cp_to_id: Dict[Int, Int]  # codepoint -> id (Gemma single-char symbols)
+    var gemma: Bool  # True -> SentencePiece-style path (no GPT2 regex)
 
     def bpe(self, mut ids: List[Int]) raises:
         while len(ids) >= 2:
@@ -78,8 +82,15 @@ struct Tokenizer(Movable):
 
         # rule 1: contractions (?i:'s|'t|'re|'ve|'m|'ll|'d)
         if c == APOS:
-            var sufs = [String("s"), String("t"), String("re"), String("ve"),
-                        String("m"), String("ll"), String("d")]
+            var sufs = [
+                String("s"),
+                String("t"),
+                String("re"),
+                String("ve"),
+                String("m"),
+                String("ll"),
+                String("d"),
+            ]
             for s in sufs:
                 var sb = s.as_bytes()
                 if pos + 1 + len(sb) <= end:
@@ -145,7 +156,9 @@ struct Tokenizer(Movable):
 
         return pos + 1  # non-ASCII / unhandled byte
 
-    def encode_normal(self, buf: List[UInt8], start: Int, stop: Int, mut out: List[Int]) raises:
+    def encode_normal(
+        self, buf: List[UInt8], start: Int, stop: Int, mut out: List[Int]
+    ) raises:
         var p = start
         while p < stop:
             var e = self.next_chunk(buf, p, stop)
@@ -159,13 +172,16 @@ struct Tokenizer(Movable):
                 out.append(x)
             p = e
 
-    def encode_gemma_gap(self, buf: List[UInt8], start: Int, stop: Int, mut out: List[Int]) raises:
+    def encode_gemma_gap(
+        self, buf: List[UInt8], start: Int, stop: Int, mut out: List[Int]
+    ) raises:
         """SentencePiece-style symbolization for a non-special gap, then BPE.
 
         Walk the gap codepoint-by-codepoint (UTF-8). Replace literal space (0x20)
         with U+2581 ("▁"). For each resulting codepoint: if it is a single-codepoint
         vocab symbol, emit its id; else byte-fallback — emit `byte_id[b]` for each
-        UTF-8 byte of the original codepoint. Then rank-greedy BPE over the gap."""
+        UTF-8 byte of the original codepoint. Then rank-greedy BPE over the gap.
+        """
         var ids = List[Int]()
         var p = start
         while p < stop:
@@ -174,15 +190,28 @@ struct Tokenizer(Movable):
             var cp: Int
             var nb: Int
             if b0 < 0x80:
-                cp = b0; nb = 1
+                cp = b0
+                nb = 1
             elif b0 >> 5 == 0b110:
-                cp = (b0 & 0x1F) << 6 | (Int(buf[p + 1]) & 0x3F); nb = 2
+                cp = (b0 & 0x1F) << 6 | (Int(buf[p + 1]) & 0x3F)
+                nb = 2
             elif b0 >> 4 == 0b1110:
-                cp = (b0 & 0x0F) << 12 | (Int(buf[p + 1]) & 0x3F) << 6 | (Int(buf[p + 2]) & 0x3F); nb = 3
+                cp = (
+                    (b0 & 0x0F) << 12
+                    | (Int(buf[p + 1]) & 0x3F) << 6
+                    | (Int(buf[p + 2]) & 0x3F)
+                )
+                nb = 3
             else:
-                cp = (b0 & 0x07) << 18 | (Int(buf[p + 1]) & 0x3F) << 12 | (Int(buf[p + 2]) & 0x3F) << 6 | (Int(buf[p + 3]) & 0x3F); nb = 4
+                cp = (
+                    (b0 & 0x07) << 18
+                    | (Int(buf[p + 1]) & 0x3F) << 12
+                    | (Int(buf[p + 2]) & 0x3F) << 6
+                    | (Int(buf[p + 3]) & 0x3F)
+                )
+                nb = 4
 
-            var sym = USCORE if cp == SPACE else cp   # normalizer: space -> ▁
+            var sym = USCORE if cp == SPACE else cp  # normalizer: space -> ▁
             if sym in self.cp_to_id:
                 ids.append(self.cp_to_id[sym])
             else:
@@ -257,6 +286,7 @@ def hex_val(c: Int) -> Int:
         return c - 48
     return c - 97 + 10  # a-f (Python .hex() is lowercase)
 
+
 def hex_to_bytes(s: String) -> List[UInt8]:
     var sb = s.as_bytes()
     var out = List[UInt8]()
@@ -266,9 +296,11 @@ def hex_to_bytes(s: String) -> List[UInt8]:
         i += 2
     return out^
 
+
 def _read(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
+
 
 def _byte_decoder() -> Dict[Int, Int]:
     """GPT-2 byte-level decoder: token-string codepoint -> raw byte (inverse of
@@ -278,12 +310,15 @@ def _byte_decoder() -> Dict[Int, Int]:
     var inbs = List[Bool]()
     for _ in range(256):
         inbs.append(False)
-    for v in range(33, 127):        # '!'..'~'
-        inbs[v] = True; dec[v] = v
-    for v in range(161, 173):       # '¡'..'¬'
-        inbs[v] = True; dec[v] = v
-    for v in range(174, 256):       # '®'..'ÿ'
-        inbs[v] = True; dec[v] = v
+    for v in range(33, 127):  # '!'..'~'
+        inbs[v] = True
+        dec[v] = v
+    for v in range(161, 173):  # '¡'..'¬'
+        inbs[v] = True
+        dec[v] = v
+    for v in range(174, 256):  # '®'..'ÿ'
+        inbs[v] = True
+        dec[v] = v
     var n = 0
     for b in range(256):
         if not inbs[b]:
@@ -318,7 +353,7 @@ def load_tokenizer_json(path: String) raises -> Tokenizer:
     for _ in range(256):
         byte_id.append(-1)
     var id_to_bytes = Dict[Int, List[UInt8]]()
-    var vocab_map = Dict[String, Int]()       # token string -> id (merge resolution)
+    var vocab_map = Dict[String, Int]()  # token string -> id (merge resolution)
 
     ref vkeys = vocab.c[].keys
     ref vvals = vocab.c[].vals
@@ -334,7 +369,7 @@ def load_tokenizer_json(path: String) raises -> Tokenizer:
     var merge_rank = Dict[Int, Int]()
     var merge_id = Dict[Int, Int]()
     ref mvals = merges.c[].vals
-    comptime VLIST = 6   # json.Value tag for a list (Qwen3+ merges are ["A","B"])
+    comptime VLIST = 6  # json.Value tag for a list (Qwen3+ merges are ["A","B"])
     for r in range(len(mvals)):
         # Two on-disk encodings: legacy Qwen2.5 stores each merge as the string
         # "A B" (neither side contains a literal space — 0x20 encodes as 'Ġ'); newer
@@ -373,8 +408,16 @@ def load_tokenizer_json(path: String) raises -> Tokenizer:
             tb.append(cb[i])
         sp_text.append(tb^)
 
-    return Tokenizer(byte_id^, merge_rank^, merge_id^, id_to_bytes^, sp_text^,
-                     sp_id^, Dict[Int, Int](), False)
+    return Tokenizer(
+        byte_id^,
+        merge_rank^,
+        merge_id^,
+        id_to_bytes^,
+        sp_text^,
+        sp_id^,
+        Dict[Int, Int](),
+        False,
+    )
 
 
 def _is_byte_token(t: String) -> Bool:
@@ -382,8 +425,12 @@ def _is_byte_token(t: String) -> Bool:
     var b = t.as_bytes()
     if len(b) != 6:
         return False
-    return (Int(b[0]) == ord("<") and Int(b[1]) == ord("0")
-            and Int(b[2]) == ord("x") and Int(b[5]) == ord(">"))
+    return (
+        Int(b[0]) == ord("<")
+        and Int(b[1]) == ord("0")
+        and Int(b[2]) == ord("x")
+        and Int(b[5]) == ord(">")
+    )
 
 
 def _gemma_token_bytes(t: String) -> List[UInt8]:
@@ -437,7 +484,7 @@ def load_gemma_tokenizer_json(path: String) raises -> Tokenizer:
         byte_id.append(-1)
     var id_to_bytes = Dict[Int, List[UInt8]]()
     var cp_to_id = Dict[Int, Int]()
-    var vocab_map = Dict[String, Int]()       # token string -> id (merge resolution)
+    var vocab_map = Dict[String, Int]()  # token string -> id (merge resolution)
 
     ref vkeys = vocab.c[].keys
     ref vvals = vocab.c[].vals
@@ -447,7 +494,9 @@ def load_gemma_tokenizer_json(path: String) raises -> Tokenizer:
         vocab_map[tok] = id
         if _is_byte_token(tok):
             var b = tok.as_bytes()
-            var nn = (hex_val(lower(Int(b[3]))) << 4) | hex_val(lower(Int(b[4])))
+            var nn = (hex_val(lower(Int(b[3]))) << 4) | hex_val(
+                lower(Int(b[4]))
+            )
             byte_id[nn] = id
             var bl = List[UInt8]()
             bl.append(UInt8(nn))
@@ -495,8 +544,16 @@ def load_gemma_tokenizer_json(path: String) raises -> Tokenizer:
             tb.append(cb[i])
         sp_text.append(tb^)
 
-    return Tokenizer(byte_id^, merge_rank^, merge_id^, id_to_bytes^, sp_text^,
-                     sp_id^, cp_to_id^, True)
+    return Tokenizer(
+        byte_id^,
+        merge_rank^,
+        merge_id^,
+        id_to_bytes^,
+        sp_text^,
+        sp_id^,
+        cp_to_id^,
+        True,
+    )
 
 
 def load_tokenizer(dir: String) raises -> Tokenizer:
@@ -531,7 +588,9 @@ def load_tokenizer(dir: String) raises -> Tokenizer:
         var parts = ls.split(" ")
         if len(parts) < 3:
             continue
-        var key = Int(atol(String(parts[0]).strip())) * MUL + Int(atol(String(parts[1]).strip()))
+        var key = Int(atol(String(parts[0]).strip())) * MUL + Int(
+            atol(String(parts[1]).strip())
+        )
         merge_rank[key] = rank
         merge_id[key] = Int(atol(String(parts[2]).strip()))
         rank += 1
@@ -552,5 +611,13 @@ def load_tokenizer(dir: String) raises -> Tokenizer:
             tb.append(txt[i])
         sp_text.append(tb^)
 
-    return Tokenizer(byte_id^, merge_rank^, merge_id^, id_to_bytes^, sp_text^,
-                     sp_id^, Dict[Int, Int](), False)
+    return Tokenizer(
+        byte_id^,
+        merge_rank^,
+        merge_id^,
+        id_to_bytes^,
+        sp_text^,
+        sp_id^,
+        Dict[Int, Int](),
+        False,
+    )

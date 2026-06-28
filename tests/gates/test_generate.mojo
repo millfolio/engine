@@ -25,7 +25,14 @@ def main() raises:
     var ids32 = read_i32(dir + "prompt_ids.bin")
     for i in range(len(ids32)):
         prompt.append(Int(ids32[i]))
-    print("generate gate — P=", len(prompt), " max_new=", max_new, "; loading weights…", sep="")
+    print(
+        "generate gate — P=",
+        len(prompt),
+        " max_new=",
+        max_new,
+        "; loading weights…",
+        sep="",
+    )
 
     var ctx = DeviceContext()
     var w = load_weights(ctx, ckpt)
@@ -46,5 +53,12 @@ def main() raises:
     print("  hf  ref: ", es, sep="")
 
     if not ok:
-        raise Error("greedy decode does NOT match HF token-for-token — gate FAILED")
-    print("OK — Mojo greedy decode matches HF token-for-token (", len(gen), " tokens)", sep="")
+        raise Error(
+            "greedy decode does NOT match HF token-for-token — gate FAILED"
+        )
+    print(
+        "OK — Mojo greedy decode matches HF token-for-token (",
+        len(gen),
+        " tokens)",
+        sep="",
+    )

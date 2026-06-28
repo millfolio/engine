@@ -19,6 +19,7 @@ from chat.gemma_chat import render_gemma
 def _hex_nibble(n: Int) -> UInt8:
     return UInt8(48 + n) if n < 10 else UInt8(97 + n - 10)  # 0-9, a-f
 
+
 def json_escape_str(b: List[UInt8]) -> String:
     """JSON-escape UTF-8 bytes into a string. Operates at the byte level so
     multibyte UTF-8 (é, emoji, CJK…) passes through intact — building the string
@@ -45,10 +46,10 @@ def json_escape_str(b: List[UInt8]) -> String:
             out.append(92)
             out.append(116)  # \t
         elif c < 0x20:  # other control char -> \u00XX
-            out.append(92)   # backslash
+            out.append(92)  # backslash
             out.append(117)  # u
-            out.append(48)   # 0
-            out.append(48)   # 0
+            out.append(48)  # 0
+            out.append(48)  # 0
             out.append(_hex_nibble((c >> 4) & 0xF))
             out.append(_hex_nibble(c & 0xF))
         else:
@@ -61,7 +62,9 @@ def load_chat_template(path: String) raises -> Template:
         return Template.compile(f.read())
 
 
-def render_value(tmpl: Template, req: Value, family: Int = FAMILY_QWEN) raises -> String:
+def render_value(
+    tmpl: Template, req: Value, family: Int = FAMILY_QWEN
+) raises -> String:
     """Render the template from an already-parsed OpenAI request `Value`.
 
     The request's `messages` (full multi-turn history, with any `tool_calls`) and

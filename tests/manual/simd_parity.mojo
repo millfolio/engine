@@ -56,7 +56,11 @@ def main() raises:
 
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
-        ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
+        ckpt = String(
+            String(
+                read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
+            ).strip()
+        )
 
     var tok = load_tokenizer("tests/fixtures/tokenizer/")
     var tmpl = load_chat_template(TEMPLATE)
@@ -67,7 +71,9 @@ def main() raises:
     var w = load_weights(ctx, ckpt)
 
     if not probe_simd_gemm(ctx):
-        raise Error("probe_simd_gemm failed — cannot test parity on this toolchain")
+        raise Error(
+            "probe_simd_gemm failed — cannot test parity on this toolchain"
+        )
     print("probe_simd_gemm: OK   prompt tokens=", len(ids))
 
     w.simd_ok = False
@@ -90,9 +96,23 @@ def main() raises:
             break
 
     if len(g_scalar) == len(g_simd) and diverge == -1:
-        print("\nsimd-parity gate: PASS — ", len(g_scalar),
-              " greedy tokens identical (scalar == simdgroup-matrix)", sep="")
+        print(
+            "\nsimd-parity gate: PASS — ",
+            len(g_scalar),
+            " greedy tokens identical (scalar == simdgroup-matrix)",
+            sep="",
+        )
     else:
-        print("\nsimd-parity gate: DIVERGED at token ", diverge,
-              " (scalar len ", len(g_scalar), ", simd len ", len(g_simd), ")", sep="")
-        raise Error("greedy parity broken: simd GEMM changed the token sequence")
+        print(
+            "\nsimd-parity gate: DIVERGED at token ",
+            diverge,
+            " (scalar len ",
+            len(g_scalar),
+            ", simd len ",
+            len(g_simd),
+            ")",
+            sep="",
+        )
+        raise Error(
+            "greedy parity broken: simd GEMM changed the token sequence"
+        )

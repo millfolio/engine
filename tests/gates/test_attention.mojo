@@ -33,7 +33,18 @@ def run(ctx: DeviceContext, dir: String) raises -> Bool:
     ctx.synchronize()
     var m = max_abs(o, read_f32(dir + "/expected.bin"))
     var ok = m < TOL
-    print("  ", dir, " T=", T, " max_abs=", m, " [", "OK" if ok else "FAIL", "]", sep="")
+    print(
+        "  ",
+        dir,
+        " T=",
+        T,
+        " max_abs=",
+        m,
+        " [",
+        "OK" if ok else "FAIL",
+        "]",
+        sep="",
+    )
     return ok
 
 
@@ -48,4 +59,7 @@ def main() raises:
         all_ok = run(ctx, root + name) and all_ok
     if not all_ok:
         raise Error("GPU attention does NOT match the reference — gate FAILED")
-    print("OK — Mojo Metal RoPE+GQA attention matches the reference on all fixtures")
+    print(
+        "OK — Mojo Metal RoPE+GQA attention matches the reference on all"
+        " fixtures"
+    )

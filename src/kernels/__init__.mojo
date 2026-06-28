@@ -12,19 +12,25 @@ head_dim 64, RoPE θ=1e6, RMSNorm ε=1e-6.
 from std.math import sqrt, exp, log, cos, sin, tanh, ceildiv
 from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
 from std.gpu.memory import AddressSpace
-from std.gpu.primitives.warp import sum as warp_sum, max as warp_max, shuffle_xor
+from std.gpu.primitives.warp import (
+    sum as warp_sum,
+    max as warp_max,
+    shuffle_xor,
+)
 from std.memory import stack_allocation
 from std.collections import InlineArray
-from std.sys import llvm_intrinsic        # compact AIR simdgroup-matrix MMA (see matmul_simd_kernel)
+from std.sys import (
+    llvm_intrinsic,
+)  # compact AIR simdgroup-matrix MMA (see matmul_simd_kernel)
 from layout import TileTensor, TensorLayout
 
 # Head/hidden dims are NOT fixed here: the head-sensitive kernels (rope_q/k,
 # attn_cached, flash) take HQ/HKV/HEAD_DIM as comptime params so one build serves
 # multiple Qwen2.5 sizes (0.5B: 14/2/64, 3B: 16/2/128). THETA/EPS are shared
 # across all Qwen2.5 sizes, so they stay module constants.
-comptime THETA = Float32(1000000.0)   # RoPE base
-comptime EPS = Float32(1.0e-6)        # RMSNorm epsilon
-comptime FLASH_PW = 3                 # flash query-tile: warps/block = FLASH_PW * GROUP
+comptime THETA = Float32(1000000.0)  # RoPE base
+comptime EPS = Float32(1.0e-6)  # RMSNorm epsilon
+comptime FLASH_PW = 3  # flash query-tile: warps/block = FLASH_PW * GROUP
 
 
 @always_inline
@@ -49,14 +55,16 @@ def cvt_kernel[
         return
     var u = rebind[Scalar[DType.uint16]](src[i])
     var bits: UInt32 = UInt32(u) << 16
-    dst[i] = rebind[dst.ElementType](UnsafePointer(to=bits).bitcast[Float32]()[0])
+    dst[i] = rebind[dst.ElementType](
+        UnsafePointer(to=bits).bitcast[Float32]()[0]
+    )
 
 
 def embed_kernel[
     LT: TensorLayout
 ](
     ids: TileTensor[DType.int32, LT, MutAnyOrigin],
-    emb: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 embedding table
+    emb: TileTensor[DType.uint16, LT, MutAnyOrigin],  # bf16 embedding table
     dst: TileTensor[DType.float32, LT, MutAnyOrigin],
     T: Int,
     H: Int,
@@ -68,7 +76,9 @@ def embed_kernel[
     var t = i // H
     var d = i % H
     var tok = Int(rebind[Scalar[DType.int32]](ids[t]))
-    dst[i] = rebind[dst.ElementType](bf16_widen(rebind[Scalar[DType.uint16]](emb[tok * H + d])))
+    dst[i] = rebind[dst.ElementType](
+        bf16_widen(rebind[Scalar[DType.uint16]](emb[tok * H + d]))
+    )
 
 
 def add_kernel[
@@ -110,7 +120,9 @@ def rmsnorm_kernel[
     for d in range(lane, H, WARP_SIZE):
         var v = rebind[Scalar[DType.float32]](X[t * H + d])
         ss += v * v
-    var rms = sqrt(warp_sum(ss) / Float32(H) + EPS)   # warp_sum broadcasts to all lanes
+    var rms = sqrt(
+        warp_sum(ss) / Float32(H) + EPS
+    )  # warp_sum broadcasts to all lanes
     for d in range(lane, H, WARP_SIZE):
         var v = rebind[Scalar[DType.float32]](X[t * H + d])
         var wv = rebind[Scalar[DType.float32]](W[d])
@@ -120,16 +132,21 @@ def rmsnorm_kernel[
 def nll_gather_kernel[
     LT: TensorLayout
 ](
-    L: TileTensor[DType.float32, LT, MutAnyOrigin],     # [n, vocab] logits
-    TGT: TileTensor[DType.int32, LT, MutAnyOrigin],     # [n] target token id per row
-    OUT: TileTensor[DType.float32, LT, MutAnyOrigin],   # [n] log P(target | row) = log_softmax(L[i])[tgt]
+    L: TileTensor[DType.float32, LT, MutAnyOrigin],  # [n, vocab] logits
+    TGT: TileTensor[
+        DType.int32, LT, MutAnyOrigin
+    ],  # [n] target token id per row
+    OUT: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [n] log P(target | row) = log_softmax(L[i])[tgt]
     n: Int,
     vocab: Int,
 ):
     """Per-row log-probability of a target token, in ONE pass over the logits on
     the GPU — for perplexity / echo logprobs. One warp per row: lanes split the
     vocab to find the row max + Σexp(x−max) (numerically stable), then lane 0 emits
-    L[i,tgt] − max − log(Σexp). Avoids ever copying the [n×vocab] logits to host."""
+    L[i,tgt] − max − log(Σexp). Avoids ever copying the [n×vocab] logits to host.
+    """
     comptime assert L.flat_rank == 1
     var i = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -157,15 +174,18 @@ def rmsnorm_add_kernel[
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
     W: TileTensor[DType.float32, LT, MutAnyOrigin],
-    R: TileTensor[DType.float32, LT, MutAnyOrigin],    # residual, added after norm
+    R: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # residual, added after norm
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     T: Int,
     H: Int,
-    scale: Float32,                                    # final ×scale (1.0 = none)
+    scale: Float32,  # final ×scale (1.0 = none)
 ):
     """Y = (RMSNorm(X)·W + R) · scale — fuses the rmsnorm + residual add (+ an
     optional per-layer scalar) that Gemma applies after every proj into ONE launch
-    (3 of these per e2b layer). Same warp-per-row reduction as rmsnorm_kernel."""
+    (3 of these per e2b layer). Same warp-per-row reduction as rmsnorm_kernel.
+    """
     comptime assert X.flat_rank == 1
     var t = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -187,7 +207,9 @@ def matmul_kernel[
     LT: TensorLayout
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 weights (raw u16 bits)
+    W: TileTensor[
+        DType.uint16, LT, MutAnyOrigin
+    ],  # bf16 weights (raw u16 bits)
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     M: Int,
@@ -206,7 +228,7 @@ def matmul_kernel[
     `warp_sum` reduces the per-lane partials. Pure f32 accumulate, same as
     before, so greedy parity is preserved (§11 #8)."""
     comptime assert X.flat_rank == 1
-    var out = Int(global_idx.x) // WARP_SIZE     # one warp per output element
+    var out = Int(global_idx.x) // WARP_SIZE  # one warp per output element
     var lane = Int(global_idx.x) % WARP_SIZE
     if out >= M * N:
         return
@@ -228,7 +250,9 @@ def matmul_tiled_kernel[
     LT: TensorLayout, TM: Int, CN: Int
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 weights (raw u16 bits)
+    W: TileTensor[
+        DType.uint16, LT, MutAnyOrigin
+    ],  # bf16 weights (raw u16 bits)
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     M: Int,
@@ -255,7 +279,9 @@ def matmul_tiled_kernel[
     measured ~2× the token-only kernel (~210 GFLOP/s) on the M4."""
     comptime assert X.flat_rank == 1
     var ncols = ceildiv(N, CN)
-    var tile = Int(global_idx.x) // WARP_SIZE     # one warp per (column-tile, token-tile)
+    var tile = (
+        Int(global_idx.x) // WARP_SIZE
+    )  # one warp per (column-tile, token-tile)
     var lane = Int(global_idx.x) % WARP_SIZE
     if tile >= ncols * ceildiv(M, TM):
         return
@@ -266,7 +292,9 @@ def matmul_tiled_kernel[
         var wv = InlineArray[Float32, CN](fill=0.0)
         for c in range(CN):
             if n0 + c < N:
-                wv[c] = bf16_widen(rebind[Scalar[DType.uint16]](W[(n0 + c) * K + k]))
+                wv[c] = bf16_widen(
+                    rebind[Scalar[DType.uint16]](W[(n0 + c) * K + k])
+                )
         for mm in range(TM):
             var m = m0 + mm
             if m < M:
@@ -276,7 +304,9 @@ def matmul_tiled_kernel[
     for mm in range(TM):
         var m = m0 + mm
         for c in range(CN):
-            var total = warp_sum(acc[mm * CN + c])   # warp collective — every lane
+            var total = warp_sum(
+                acc[mm * CN + c]
+            )  # warp collective — every lane
             var n = n0 + c
             if lane == 0 and m < M and n < N:
                 var bias = Float32(0.0)
@@ -312,14 +342,14 @@ def matmul_tiled_kernel[
 # 16×16 op is hardware-gated to M5/GPUFamily10 — see .scratch/mma16_test.mojo —
 # but this 8×8 op runs on M1–M4.)
 comptime _MMA8 = 8
-comptime _FRAG8 = 2              # 8×8 = 64 elems / 32 lanes = 2 floats per lane
-comptime SG_BM = 64              # threadgroup output rows
-comptime SG_BN = 64              # threadgroup output cols
-comptime _SG_SGM = SG_BM // 2    # 32 — simdgroup subtile rows
-comptime _SG_SGN = SG_BN // 2    # 32 — simdgroup subtile cols
-comptime _SG_NTM = _SG_SGM // _MMA8   # 4 row-fragments per simdgroup
-comptime _SG_NTN = _SG_SGN // _MMA8   # 4 col-fragments per simdgroup
-comptime SG_TPB = 4 * 32         # 128 threads/block = 4 simdgroups × 32
+comptime _FRAG8 = 2  # 8×8 = 64 elems / 32 lanes = 2 floats per lane
+comptime SG_BM = 64  # threadgroup output rows
+comptime SG_BN = 64  # threadgroup output cols
+comptime _SG_SGM = SG_BM // 2  # 32 — simdgroup subtile rows
+comptime _SG_SGN = SG_BN // 2  # 32 — simdgroup subtile cols
+comptime _SG_NTM = _SG_SGM // _MMA8  # 4 row-fragments per simdgroup
+comptime _SG_NTN = _SG_SGN // _MMA8  # 4 col-fragments per simdgroup
+comptime SG_TPB = 4 * 32  # 128 threads/block = 4 simdgroups × 32
 
 
 @always_inline
@@ -339,7 +369,8 @@ def _mma8x8(
     b: SIMD[DType.float32, _FRAG8],
     c: SIMD[DType.float32, _FRAG8],
 ) -> SIMD[DType.float32, _FRAG8]:
-    """One 8×8×8 simdgroup-matrix multiply-accumulate: D = A·B + C (compact frag)."""
+    """One 8×8×8 simdgroup-matrix multiply-accumulate: D = A·B + C (compact frag).
+    """
     return llvm_intrinsic[
         "llvm.air.simdgroup_matrix_8x8_multiply_accumulate",
         SIMD[DType.float32, _FRAG8],
@@ -350,7 +381,8 @@ def _mma8x8(
 def _frag_row_max(v: Float32) -> Float32:
     """Reduce a value ACROSS one fragment row (used by tensor-core attention's
     online softmax). In `_frag8_layout` the 4 lanes sharing a row differ only in
-    lane bits 0 and 3, so two butterfly shuffles broadcast the row's max to all."""
+    lane bits 0 and 3, so two butterfly shuffles broadcast the row's max to all.
+    """
     var r = v
     var a = shuffle_xor(r, UInt32(1))
     r = a if a > r else r
@@ -372,7 +404,9 @@ def matmul_simd_kernel[
     LT: TensorLayout
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 weights (raw u16 bits)
+    W: TileTensor[
+        DType.uint16, LT, MutAnyOrigin
+    ],  # bf16 weights (raw u16 bits)
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     M: Int,
@@ -388,7 +422,7 @@ def matmul_simd_kernel[
     var fl = _frag8_layout(lane)
     var frow = fl[0]
     var fcol = fl[1]
-    var sg = Int(thread_idx.x) // 32           # simdgroup id 0..3
+    var sg = Int(thread_idx.x) // 32  # simdgroup id 0..3
     var row_base = Int(block_idx.y) * SG_BM + (sg // 2) * _SG_SGM
     var col_base = Int(block_idx.x) * SG_BN + (sg % 2) * _SG_SGN
     # Fully-interior subtile → unguarded loads (the common case).
@@ -403,10 +437,12 @@ def matmul_simd_kernel[
     var nkt = ceildiv(K, _MMA8)
     for ks in range(nkt):
         var kk = ks * _MMA8
-        var ktail = (kk + _MMA8 > K)           # final K-block is partial
+        var ktail = kk + _MMA8 > K  # final K-block is partial
         # A (X) is f32 [M,K] row-major: lane's 2 frag elems are consecutive K
         # cols kk+fcol, kk+fcol+1. K bound only on the partial tail block.
-        var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](uninitialized=True)
+        var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](
+            uninitialized=True
+        )
         comptime for mi in range(_SG_NTM):
             var grow = row_base + mi * _MMA8 + frow
             if (interior or grow < M) and not ktail:
@@ -420,7 +456,9 @@ def matmul_simd_kernel[
                 afrag[mi] = af
         # B (W) is bf16 [N,K] (transpose_b): B[k_idx, j] = bf16(W[j, k_idx]).
         # frag slots differ in j (col); row is kk+frow (K bound only on the tail).
-        var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](uninitialized=True)
+        var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](
+            uninitialized=True
+        )
         comptime for ni in range(_SG_NTN):
             var bf = SIMD[DType.float32, _FRAG8](0)
             if not ktail or kk + frow < K:
@@ -458,17 +496,22 @@ def matmul_simd_kernel[
 # Only the W-read changes vs the bf16 kernels; the matmul math (and the
 # simdgroup-matrix path) is identical, so the 4.5× prefill carries over.
 comptime Q4_GROUP = 128
-comptime Q4_SHIFT = 7                  # log2(Q4_GROUP)
+comptime Q4_SHIFT = 7  # log2(Q4_GROUP)
 comptime _Q4_SHIFTS = SIMD[DType.uint32, 8](0, 4, 8, 12, 16, 20, 24, 28)
-comptime _Q4_BK = 32                   # K-chunk dequantized into shared per barrier
-                                       # in matmul_simd_q4_kernel (mult of 8; 64×32 fp32 = 8 KB)
+comptime _Q4_BK = 32  # K-chunk dequantized into shared per barrier
+# in matmul_simd_q4_kernel (mult of 8; 64×32 fp32 = 8 KB)
 
 
 @always_inline
-def q4_deq[LT: TensorLayout](
+def q4_deq[
+    LT: TensorLayout
+](
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
-    n: Int, k: Int, K: Int, NG: Int,
+    n: Int,
+    k: Int,
+    K: Int,
+    NG: Int,
 ) -> Float32:
     """Dequant a single weight (n,k). Used by the prefill GEMM W-staging, where
     the matmul (not the dequant) dominates."""
@@ -488,7 +531,11 @@ def matmul_q4_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """Decode GEMV for int4 weights (M=1). One warp per output; the warp's lanes
     split K. Each lane consumes **eight** packed u32 per step via a single 256-bit
@@ -514,7 +561,7 @@ def matmul_q4_kernel[
     var xp = X.ptr
     var sp = S.ptr
     var acc = Float32(0.0)
-    var octs = words // 8                 # 8 packed u32 = 64 weights per lane/step
+    var octs = words // 8  # 8 packed u32 = 64 weights per lane/step
     for q in range(lane, octs, WARP_SIZE):
         var word8 = (pp + rowword + q * 8).load[width=8]()
         var k0 = q * 64
@@ -531,11 +578,11 @@ def matmul_q4_kernel[
         Y[m * N + n] = rebind[Y.ElementType](total)
 
 
-comptime SPEC_MAX_M = 8         # small-M int4 path cap. Above this the flat 64-row
-                                # simdgroup GEMM wins; mm_w routes M>SPEC_MAX_M there.
-comptime SPEC_SMALL_MIN = 5     # M in [SPEC_SMALL_MIN, SPEC_MAX_M] uses the 1-tile
-                                # MMA GEMM (flat); M in [2, SPEC_SMALL_MIN) uses the
-                                # batched GEMV (cheaper at the very smallest batches).
+comptime SPEC_MAX_M = 8  # small-M int4 path cap. Above this the flat 64-row
+# simdgroup GEMM wins; mm_w routes M>SPEC_MAX_M there.
+comptime SPEC_SMALL_MIN = 5  # M in [SPEC_SMALL_MIN, SPEC_MAX_M] uses the 1-tile
+# MMA GEMM (flat); M in [2, SPEC_SMALL_MIN) uses the
+# batched GEMV (cheaper at the very smallest batches).
 
 
 def matmul_q4_batch_kernel[
@@ -546,7 +593,11 @@ def matmul_q4_batch_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """Batched int4 GEMV for small M (2..SPEC_MAX_M, e.g. speculative verify):
     one warp per output COLUMN n. The warp loads each 256-bit weight oct ONCE —
@@ -567,7 +618,7 @@ def matmul_q4_batch_kernel[
     var xp = X.ptr
     var sp = S.ptr
     var acc = InlineArray[Float32, SPEC_MAX_M](fill=0.0)
-    var octs = words // 8                 # 8 packed u32 = 64 weights per lane/step
+    var octs = words // 8  # 8 packed u32 = 64 weights per lane/step
     for q in range(lane, octs, WARP_SIZE):
         var word8 = (pp + rowword + q * 8).load[width=8]()
         var k0 = q * 64
@@ -590,16 +641,22 @@ def matmul_norm_kernel[
     LT: TensorLayout
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    LNW: TileTensor[DType.float32, LT, MutAnyOrigin],   # RMSNorm weight [K]
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],      # bf16 weights (raw u16 bits)
+    LNW: TileTensor[DType.float32, LT, MutAnyOrigin],  # RMSNorm weight [K]
+    W: TileTensor[
+        DType.uint16, LT, MutAnyOrigin
+    ],  # bf16 weights (raw u16 bits)
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    use_bias: Int,
 ):
     """bf16 decode GEMV with RMSNorm fused into the input row: each warp already
     streams the full input row x[k] for its dot, so it accumulates Σx[k]² in the
     same K-loop — `out = (Σ x[k]·lnw[k]·W[n,k]) / rms`, rms = √(mean(x²)+EPS) — and
-    the separate RMSNorm launch (and its x round-trip) disappears (decode only)."""
+    the separate RMSNorm launch (and its x round-trip) disappears (decode only).
+    """
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -627,15 +684,20 @@ def matmul_q4_norm_kernel[
     LT: TensorLayout
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    LNW: TileTensor[DType.float32, LT, MutAnyOrigin],   # RMSNorm weight [K]
+    LNW: TileTensor[DType.float32, LT, MutAnyOrigin],  # RMSNorm weight [K]
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """int4 decode GEMV with RMSNorm fused in (see matmul_norm_kernel). Folds the
-    pre-projection RMSNorm into the qkv / gate_up GEMVs — −2 launches per layer."""
+    pre-projection RMSNorm into the qkv / gate_up GEMVs — −2 launches per layer.
+    """
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -652,7 +714,7 @@ def matmul_q4_norm_kernel[
     var sp = S.ptr
     var acc = Float32(0.0)
     var ss = Float32(0.0)
-    var octs = words // 8                 # 256-bit weight loads, see matmul_q4_kernel
+    var octs = words // 8  # 256-bit weight loads, see matmul_q4_kernel
     for q in range(lane, octs, WARP_SIZE):
         var word8 = (pp + rowword + q * 8).load[width=8]()
         var k0 = q * 64
@@ -679,12 +741,19 @@ def matmul_q4_resid_kernel[
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
-    R: TileTensor[DType.float32, LT, MutAnyOrigin],   # residual added in the epilogue
+    R: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # residual added in the epilogue
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """matmul_q4_kernel with a fused residual add (Y = X·Wᵀ(+bias) + R). Folds the
-    decode residual into the proj GEMV, saving one launch per layer (×2: o & down)."""
+    decode residual into the proj GEMV, saving one launch per layer (×2: o & down).
+    """
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -699,7 +768,7 @@ def matmul_q4_resid_kernel[
     var xp = X.ptr
     var sp = S.ptr
     var acc = Float32(0.0)
-    var octs = words // 8                 # 256-bit weight loads, see matmul_q4_kernel
+    var octs = words // 8  # 256-bit weight loads, see matmul_q4_kernel
     for q in range(lane, octs, WARP_SIZE):
         var word8 = (pp + rowword + q * 8).load[width=8]()
         var k0 = q * 64
@@ -721,11 +790,18 @@ def matmul_resid_kernel[
     LT: TensorLayout
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],   # bf16 weights (raw u16 bits)
+    W: TileTensor[
+        DType.uint16, LT, MutAnyOrigin
+    ],  # bf16 weights (raw u16 bits)
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
-    R: TileTensor[DType.float32, LT, MutAnyOrigin],   # residual added in the epilogue
+    R: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # residual added in the epilogue
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    use_bias: Int,
 ):
     """matmul_kernel (bf16 decode GEMV) with a fused residual add."""
     comptime assert X.flat_rank == 1
@@ -751,12 +827,17 @@ def matmul_resid_kernel[
 def matmul_q4_silu_resid_kernel[
     LT: TensorLayout
 ](
-    GU: TileTensor[DType.float32, LT, MutAnyOrigin],   # [M, 2*K]: row = gate(K) ++ up(K)
+    GU: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [M, 2*K]: row = gate(K) ++ up(K)
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     R: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
 ):
     """int4 down-proj decode GEMV with SwiGLU fused on the input: reads the fused
     gate|up GEMV output and forms act[k]=silu(gate[k])·up[k] on load, so the
@@ -776,7 +857,7 @@ def matmul_q4_silu_resid_kernel[
     var gp = GU.ptr
     var sp = S.ptr
     var acc = Float32(0.0)
-    var octs = words // 8                 # 256-bit weight loads, see matmul_q4_kernel
+    var octs = words // 8  # 256-bit weight loads, see matmul_q4_kernel
     for q in range(lane, octs, WARP_SIZE):
         var word8 = (pp + rowword + q * 8).load[width=8]()
         var k0 = q * 64
@@ -797,13 +878,16 @@ def matmul_q4_silu_resid_kernel[
 def matmul_silu_resid_kernel[
     LT: TensorLayout
 ](
-    GU: TileTensor[DType.float32, LT, MutAnyOrigin],   # [M, 2*K]: gate ++ up
-    W: TileTensor[DType.uint16, LT, MutAnyOrigin],     # bf16 weights
+    GU: TileTensor[DType.float32, LT, MutAnyOrigin],  # [M, 2*K]: gate ++ up
+    W: TileTensor[DType.uint16, LT, MutAnyOrigin],  # bf16 weights
     R: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int,
+    M: Int,
+    K: Int,
+    N: Int,
 ):
-    """bf16 down-proj decode GEMV with SwiGLU fused on the input (see q4 variant)."""
+    """bf16 down-proj decode GEMV with SwiGLU fused on the input (see q4 variant).
+    """
     comptime assert GU.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -833,7 +917,11 @@ def matmul_tiled_q4_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """int4 scalar prefill fallback — matmul_tiled_kernel with q4_deq W-reads.
     Used only if the simdgroup-matrix probe fails."""
@@ -877,7 +965,11 @@ def matmul_simd_q4_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """int4 prefill GEMM on the compact 8×8 simdgroup-matrix units, with the
     weight tile **dequantized into threadgroup shared memory once per block**
@@ -905,7 +997,7 @@ def matmul_simd_q4_kernel[
     var col_base = blk_col + (sg % 2) * _SG_SGN
 
     var Bs = stack_allocation[
-        _Q4_BK * SG_BN, Float32, address_space = AddressSpace.SHARED
+        _Q4_BK * SG_BN, Float32, address_space=AddressSpace.SHARED
     ]()
 
     var xp = X.ptr
@@ -931,9 +1023,13 @@ def matmul_simd_q4_kernel[
                 var word = pp[(gj * K + gk0) >> 3]
                 var scale = sp[gj * NG + (gk0 >> Q4_SHIFT)]
                 var nibs = (SIMD[DType.uint32, 8](word) >> _Q4_SHIFTS) & 0xF
-                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]() * scale
+                var qf = (nibs.cast[DType.int32]() - 8).cast[
+                    DType.float32
+                ]() * scale
                 comptime for t in range(8):
-                    Bs[(krun + t) * SG_BN + j_local] = qf[t] if gk0 + t < K else 0.0
+                    Bs[(krun + t) * SG_BN + j_local] = (
+                        qf[t] if gk0 + t < K else 0.0
+                    )
             else:
                 comptime for t in range(8):
                     Bs[(krun + t) * SG_BN + j_local] = 0.0
@@ -944,8 +1040,10 @@ def matmul_simd_q4_kernel[
             var kk = kc + kss * _MMA8
             if kk >= K:
                 continue
-            var ktail = (kk + _MMA8 > K)
-            var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](uninitialized=True)
+            var ktail = kk + _MMA8 > K
+            var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](
+                uninitialized=True
+            )
             comptime for mi in range(_SG_NTM):
                 var grow = row_base + mi * _MMA8 + frow
                 if grow < M and not ktail:
@@ -958,9 +1056,16 @@ def matmul_simd_q4_kernel[
                                 af[s] = xp[grow * K + kk + fcol + s]
                     afrag[mi] = af
             # B (W) read from shared: Bs[(kk_local+frow)][(sg col half) + ni*8 + fcol]
-            var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](uninitialized=True)
+            var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](
+                uninitialized=True
+            )
             comptime for ni in range(_SG_NTN):
-                var brow = (kss * _MMA8 + frow) * SG_BN + (sg % 2) * _SG_SGN + ni * _MMA8 + fcol
+                var brow = (
+                    (kss * _MMA8 + frow) * SG_BN
+                    + (sg % 2) * _SG_SGN
+                    + ni * _MMA8
+                    + fcol
+                )
                 bfrag[ni] = (Bs + brow).load[width=_FRAG8]()
             comptime for mi in range(_SG_NTM):
                 comptime for ni in range(_SG_NTN):
@@ -988,13 +1093,13 @@ def matmul_simd_q4_kernel[
 # full 64-row tile regardless of M → compute-bound on wasted rows at small M). Same
 # coalesced shared-W dequant + 8×8 MMA math as matmul_simd_q4_kernel, just with the
 # M dimension collapsed to a single fragment shared across all the col simdgroups.
-comptime _SM_BN = 64                          # output cols per block
-comptime _SM_NSG = 4                          # simdgroups/block (col-tiled, 1 row tile)
-comptime _SM_SGN = _SM_BN // _SM_NSG          # 16 cols per simdgroup
-comptime _SM_NTN = _SM_SGN // _MMA8           # 2 col-fragments per simdgroup
-comptime _SM_TPB = _SM_NSG * 32               # 128 threads/block
-comptime _SM_BK = 32                           # K-chunk staged to shared (32×64 fp32
-                                               # = 8 KB; 4 words/col ⇒ 4-wide coalesce)
+comptime _SM_BN = 64  # output cols per block
+comptime _SM_NSG = 4  # simdgroups/block (col-tiled, 1 row tile)
+comptime _SM_SGN = _SM_BN // _SM_NSG  # 16 cols per simdgroup
+comptime _SM_NTN = _SM_SGN // _MMA8  # 2 col-fragments per simdgroup
+comptime _SM_TPB = _SM_NSG * 32  # 128 threads/block
+comptime _SM_BK = 32  # K-chunk staged to shared (32×64 fp32
+# = 8 KB; 4 words/col ⇒ 4-wide coalesce)
 
 
 def matmul_q4_small_kernel[
@@ -1005,7 +1110,11 @@ def matmul_q4_small_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int, K: Int, N: Int, NG: Int, use_bias: Int,
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
 ):
     """int4 GEMM for M ≤ 8 (speculative verify). grid=(ceildiv(N,_SM_BN),1),
     block_dim=_SM_TPB. One 8-row MMA tile (row_base=0) is shared across the block's
@@ -1024,7 +1133,7 @@ def matmul_q4_small_kernel[
     var col_base = blk_col + sg * _SM_SGN
 
     var Bs = stack_allocation[
-        _SM_BK * _SM_BN, Float32, address_space = AddressSpace.SHARED
+        _SM_BK * _SM_BN, Float32, address_space=AddressSpace.SHARED
     ]()
     var xp = X.ptr
     var pp = P.ptr
@@ -1049,9 +1158,13 @@ def matmul_q4_small_kernel[
                 var word = pp[(gj * K + gk0) >> 3]
                 var scale = sp[gj * NG + (gk0 >> Q4_SHIFT)]
                 var nibs = (SIMD[DType.uint32, 8](word) >> _Q4_SHIFTS) & 0xF
-                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]() * scale
+                var qf = (nibs.cast[DType.int32]() - 8).cast[
+                    DType.float32
+                ]() * scale
                 comptime for t in range(8):
-                    Bs[(krun + t) * _SM_BN + j_local] = qf[t] if gk0 + t < K else 0.0
+                    Bs[(krun + t) * _SM_BN + j_local] = (
+                        qf[t] if gk0 + t < K else 0.0
+                    )
             else:
                 comptime for t in range(8):
                     Bs[(krun + t) * _SM_BN + j_local] = 0.0
@@ -1062,7 +1175,7 @@ def matmul_q4_small_kernel[
             var kk = kc + kss * _MMA8
             if kk >= K:
                 continue
-            var ktail = (kk + _MMA8 > K)
+            var ktail = kk + _MMA8 > K
             # A (X) fragment — single 8-row tile (rows 0..7 = frow), cols kk+fcol,+1.
             var grow = frow
             var afrag = SIMD[DType.float32, _FRAG8](0)
@@ -1073,7 +1186,12 @@ def matmul_q4_small_kernel[
                     if kk + fcol + s < K:
                         afrag[s] = xp[grow * K + kk + fcol + s]
             comptime for ni in range(_SM_NTN):
-                var brow = (kss * _MMA8 + frow) * _SM_BN + sg * _SM_SGN + ni * _MMA8 + fcol
+                var brow = (
+                    (kss * _MMA8 + frow) * _SM_BN
+                    + sg * _SM_SGN
+                    + ni * _MMA8
+                    + fcol
+                )
                 var bfrag = (Bs + brow).load[width=_FRAG8]()
                 acc[ni] = _mma8x8(afrag, bfrag, acc[ni])
         barrier()
@@ -1111,8 +1229,10 @@ def silu_mul_kernel[
 def silu_mul_cat_kernel[
     LT: TensorLayout
 ](
-    GU: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, 2*inter]: row = gate(inter) ++ up(inter)
-    Y: TileTensor[DType.float32, LT, MutAnyOrigin],    # [T, inter]
+    GU: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [T, 2*inter]: row = gate(inter) ++ up(inter)
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],  # [T, inter]
     T: Int,
     inter: Int,
 ):
@@ -1130,14 +1250,18 @@ def silu_mul_cat_kernel[
     Y[idx] = rebind[Y.ElementType]((g / (1.0 + exp(-g))) * u)
 
 
-comptime _GELU_C = Float32(0.7978845608028654)   # √(2/π), for the tanh GELU approx
+comptime _GELU_C = Float32(
+    0.7978845608028654
+)  # √(2/π), for the tanh GELU approx
 
 
 def gelu_mul_cat_kernel[
     LT: TensorLayout
 ](
-    GU: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, 2*inter]: gate(inter) ++ up(inter)
-    Y: TileTensor[DType.float32, LT, MutAnyOrigin],    # [T, inter]
+    GU: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [T, 2*inter]: gate(inter) ++ up(inter)
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],  # [T, inter]
     T: Int,
     inter: Int,
 ):
@@ -1159,9 +1283,9 @@ def gelu_mul_cat_kernel[
 def gelu_mul_kernel[
     LT: TensorLayout
 ](
-    A: TileTensor[DType.float32, LT, MutAnyOrigin],   # [n] gate
-    B: TileTensor[DType.float32, LT, MutAnyOrigin],   # [n] multiplier
-    Y: TileTensor[DType.float32, LT, MutAnyOrigin],   # [n] out
+    A: TileTensor[DType.float32, LT, MutAnyOrigin],  # [n] gate
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],  # [n] multiplier
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],  # [n] out
     n: Int,
 ):
     """Y = gelu_tanh(A)·B over two SEPARATE [n] buffers (Gemma3n per-layer-input
@@ -1180,13 +1304,19 @@ def gelu_mul_kernel[
 def gelu_mul_strided_kernel[
     LT: TensorLayout
 ](
-    A: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, n] gate
-    P: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, stride] (per-layer-input table)
-    Y: TileTensor[DType.float32, LT, MutAnyOrigin],   # [T, n] out
-    T: Int, n: Int, stride: Int, off: Int,
+    A: TileTensor[DType.float32, LT, MutAnyOrigin],  # [T, n] gate
+    P: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [T, stride] (per-layer-input table)
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],  # [T, n] out
+    T: Int,
+    n: Int,
+    stride: Int,
+    off: Int,
 ):
     """Y[t,j] = gelu_tanh(A[t,j]) · P[t, off+j] — the Gemma3n PLE gate fused with the
-    strided slice of the per-layer-input table (copy_strided + gelu_mul → 1 launch)."""
+    strided slice of the per-layer-input table (copy_strided + gelu_mul → 1 launch).
+    """
     comptime assert A.flat_rank == 1
     var i = global_idx.x
     if i >= T * n:
@@ -1202,12 +1332,15 @@ def gelu_mul_strided_kernel[
 def softcap_kernel[
     LT: TensorLayout
 ](
-    X: TileTensor[DType.float32, LT, MutAnyOrigin],   # in-place: X ← cap·tanh(X/cap)
+    X: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # in-place: X ← cap·tanh(X/cap)
     n: Int,
     cap: Float32,
 ):
     """Logit soft-capping (Gemma): X ← cap·tanh(X/cap), in place. Used for the
-    final-logit softcap (cap=30) and reusable for the attention-logit softcap."""
+    final-logit softcap (cap=30) and reusable for the attention-logit softcap.
+    """
     comptime assert X.flat_rank == 1
     var i = global_idx.x
     if i >= n:
@@ -1219,7 +1352,7 @@ def softcap_kernel[
 def add_scalar_kernel[
     LT: TensorLayout
 ](
-    X: TileTensor[DType.float32, LT, MutAnyOrigin],   # in-place: X ← X + c
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],  # in-place: X ← X + c
     n: Int,
     c: Float32,
 ):
@@ -1253,8 +1386,12 @@ def mul_scalar_kernel[
 def vnorm_kernel[
     LT: TensorLayout, HKV: Int, HEAD_DIM: Int
 ](
-    In: TileTensor[DType.float32, LT, MutAnyOrigin],   # V source (row = in_stride, V at in_off)
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],   # [max, HKV, HEAD_DIM] V cache
+    In: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # V source (row = in_stride, V at in_off)
+    Vc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] V cache
     Tq: Int,
     q_offset: Int,
     in_stride: Int,
@@ -1263,7 +1400,8 @@ def vnorm_kernel[
     """Gemma per-head SCALE-FREE RMSNorm over V (v_norm has no weight): one thread
     per (token, kv-head) normalizes that head's HEAD_DIM values by 1/sqrt(mean(x²)+
     eps) and writes them into the V cache at the absolute-position row (like
-    rope_k writes K). Used by Gemma's full-attention layers where V = v_norm(k_proj)."""
+    rope_k writes K). Used by Gemma's full-attention layers where V = v_norm(k_proj).
+    """
     comptime assert In.flat_rank == 1
     var nkv = HKV * HEAD_DIM
     var idx = Int(global_idx.x)
@@ -1297,23 +1435,28 @@ def copy_kernel[
 def copy_strided_kernel[
     LT: TensorLayout
 ](
-    src: TileTensor[DType.float32, LT, MutAnyOrigin],   # row = in_stride, slice at in_off
+    src: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # row = in_stride, slice at in_off
     dst: TileTensor[DType.float32, LT, MutAnyOrigin],
     T: Int,
     in_stride: Int,
     in_off: Int,
     dst_off: Int,
-    n: Int,                                             # slice width per row
+    n: Int,  # slice width per row
 ):
     """Copy a [T, n] column-slice out of a strided source (e.g. the V part of a
-    fused [q|k|v] buffer) into dst[dst_off:] contiguously — V into its cache rows."""
+    fused [q|k|v] buffer) into dst[dst_off:] contiguously — V into its cache rows.
+    """
     comptime assert dst.flat_rank == 1
     var idx = global_idx.x
     if idx >= T * n:
         return
     var t = idx // n
     var j = idx % n
-    dst[dst_off + t * n + j] = rebind[dst.ElementType](src[t * in_stride + in_off + j])
+    dst[dst_off + t * n + j] = rebind[dst.ElementType](
+        src[t * in_stride + in_off + j]
+    )
 
 
 def slice_row_kernel[
@@ -1343,7 +1486,8 @@ def _head_rrms[
     HEAD_DIM: Int,
 ) -> Float32:
     """Reciprocal RMS over one head's HEAD_DIM contiguous elements at `base`:
-    1 / sqrt(mean(x²) + EPS). Qwen3 QK-RMSNorm normalizes per head before RoPE."""
+    1 / sqrt(mean(x²) + EPS). Qwen3 QK-RMSNorm normalizes per head before RoPE.
+    """
     var ss = Float32(0.0)
     for d in range(HEAD_DIM):
         var v = rebind[Scalar[DType.float32]](src[base + d])
@@ -1354,15 +1498,21 @@ def _head_rrms[
 def rope_k_kernel[
     LT: TensorLayout, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
 ](
-    Kin: TileTensor[DType.float32, LT, MutAnyOrigin],   # K source (row = in_stride, K at in_off)
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] cache (rotated)
-    Kn: TileTensor[DType.float32, LT, MutAnyOrigin],    # [HEAD_DIM] k_norm weight (dummy if !QK_NORM)
+    Kin: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # K source (row = in_stride, K at in_off)
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] cache (rotated)
+    Kn: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [HEAD_DIM] k_norm weight (dummy if !QK_NORM)
     Tq: Int,
     q_offset: Int,
-    in_stride: Int,    # source row stride (= nkv unfused, = hd+2nkv when reading fused qkv)
-    in_off: Int,       # source column offset of K within the row (0 unfused, hd when fused)
-    theta: Float32 = THETA,   # RoPE base (Qwen passes THETA; Gemma per-layer 1e4/1e6)
-    rot_pairs: Int = -1,      # # of d-pairs rotated (<0 = HALF = full rotary; Gemma partial = 64)
+    in_stride: Int,  # source row stride (= nkv unfused, = hd+2nkv when reading fused qkv)
+    in_off: Int,  # source column offset of K within the row (0 unfused, hd when fused)
+    theta: Float32 = THETA,  # RoPE base (Qwen passes THETA; Gemma per-layer 1e4/1e6)
+    rot_pairs: Int = -1,  # # of d-pairs rotated (<0 = HALF = full rotary; Gemma partial = 64)
 ):
     """Apply RoPE to freshly-projected K and write it into the cache at its
     absolute-position rows. Doing this once on write (one thread per token×kv-
@@ -1382,7 +1532,9 @@ def rope_k_kernel[
     var kvh = idx % HKV
     var pos = q_offset + t
     var inbase = t * in_stride + in_off + kvh * HEAD_DIM
-    var outbase = (q_offset + t) * nkv + kvh * HEAD_DIM   # cache row = absolute position
+    var outbase = (
+        q_offset + t
+    ) * nkv + kvh * HEAD_DIM  # cache row = absolute position
     var rrms = Float32(1.0)
     comptime if QK_NORM:
         rrms = _head_rrms(Kin, inbase, HEAD_DIM)
@@ -1396,7 +1548,7 @@ def rope_k_kernel[
             var g1 = rebind[Scalar[DType.float32]](Kn[d + HALF])
             x0 = x0 * rrms * g0
             x1 = x1 * rrms * g1
-        if d < npair:        # partial rotary: only the first npair pairs rotate
+        if d < npair:  # partial rotary: only the first npair pairs rotate
             var freq = exp(-(2.0 * Float32(d) / Float32(HEAD_DIM)) * lt)
             var ang = Float32(pos) * freq
             var c = cos(ang)
@@ -1411,15 +1563,23 @@ def rope_k_kernel[
 def rope_kv_kernel[
     LT: TensorLayout, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
 ](
-    In: TileTensor[DType.float32, LT, MutAnyOrigin],    # fused [q|k|v] buffer (row = in_stride)
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] K cache (rotated)
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] V cache (copied)
-    Kn: TileTensor[DType.float32, LT, MutAnyOrigin],    # [HEAD_DIM] k_norm weight (dummy if !QK_NORM)
+    In: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # fused [q|k|v] buffer (row = in_stride)
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] K cache (rotated)
+    Vc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] V cache (copied)
+    Kn: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [HEAD_DIM] k_norm weight (dummy if !QK_NORM)
     Tq: Int,
     q_offset: Int,
-    in_stride: Int,    # source row stride (= hd + 2*nkv when reading fused qkv)
-    k_off: Int,        # column offset of K within the row
-    v_off: Int,        # column offset of V within the row
+    in_stride: Int,  # source row stride (= hd + 2*nkv when reading fused qkv)
+    k_off: Int,  # column offset of K within the row
+    v_off: Int,  # column offset of V within the row
     theta: Float32 = THETA,
     rot_pairs: Int = -1,
 ):
@@ -1438,7 +1598,7 @@ def rope_kv_kernel[
     var pos = q_offset + t
     var kin = t * in_stride + k_off + kvh * HEAD_DIM
     var vin = t * in_stride + v_off + kvh * HEAD_DIM
-    var outbase = pos * nkv + kvh * HEAD_DIM           # cache row = absolute position
+    var outbase = pos * nkv + kvh * HEAD_DIM  # cache row = absolute position
     var rrms = Float32(1.0)
     comptime if QK_NORM:
         rrms = _head_rrms(In, kin, HEAD_DIM)
@@ -1470,13 +1630,19 @@ def rope_kv_kernel[
 def rope_q_kernel[
     LT: TensorLayout, HQ: Int, HEAD_DIM: Int, QK_NORM: Bool = False
 ](
-    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # Q source (row = in_stride, Q at in_off)
-    Qr: TileTensor[DType.float32, LT, MutAnyOrigin],    # [Tq, HQ, HEAD_DIM] rotated out (contiguous)
-    Qn: TileTensor[DType.float32, LT, MutAnyOrigin],    # [HEAD_DIM] q_norm weight (dummy if !QK_NORM)
+    Q: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # Q source (row = in_stride, Q at in_off)
+    Qr: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [Tq, HQ, HEAD_DIM] rotated out (contiguous)
+    Qn: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [HEAD_DIM] q_norm weight (dummy if !QK_NORM)
     Tq: Int,
     q_offset: Int,
-    in_stride: Int,    # source row stride (= hd unfused, = hd+2nkv when reading fused qkv)
-    in_off: Int,       # source column offset of Q within the row (0; Q is first in [q|k|v])
+    in_stride: Int,  # source row stride (= hd unfused, = hd+2nkv when reading fused qkv)
+    in_off: Int,  # source column offset of Q within the row (0; Q is first in [q|k|v])
     theta: Float32 = THETA,
     rot_pairs: Int = -1,
 ):
@@ -1525,10 +1691,14 @@ def rope_q_kernel[
 def attn_cached_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int
 ](
-    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] RoPE-rotated, row = abs position
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM]
-    O: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM]
+    Q: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] RoPE-rotated, row = abs position
+    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
 ):
@@ -1547,12 +1717,13 @@ def attn_cached_kernel[
     the per-key Q·K dot and V accumulate use SIMD[VEC] vector loads. The vector
     dot sums VEC partials before the horizontal reduce, so the 64-term sum order
     differs from a scalar loop — output drifts by ≤4e-9 (pure f32 rounding), far
-    under the forward tolerance, and greedy decode stays token-for-token (§11 #12)."""
+    under the forward tolerance, and greedy decode stays token-for-token (§11 #12).
+    """
     comptime assert Q.flat_rank == 1
     comptime VEC = 8
     comptime NVEC = HEAD_DIM // VEC
     comptime GROUP = HQ // HKV
-    var qh = Int(global_idx.x) // WARP_SIZE     # one warp per (query, head)
+    var qh = Int(global_idx.x) // WARP_SIZE  # one warp per (query, head)
     var lane = Int(global_idx.x) % WARP_SIZE
     var h = qh % HQ
     var t = qh // HQ
@@ -1601,11 +1772,17 @@ def attn_cached_kernel[
 def attn_cached_rope_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
 ](
-    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # RAW Q slice (row = q_stride, Q at q_off) — NOT pre-rotated
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] RoPE-rotated cache
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM]
-    Qn: TileTensor[DType.float32, LT, MutAnyOrigin],    # [HEAD_DIM] q_norm weight (dummy if !QK_NORM)
-    O: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM]
+    Q: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # RAW Q slice (row = q_stride, Q at q_off) — NOT pre-rotated
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] RoPE-rotated cache
+    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    Qn: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [HEAD_DIM] q_norm weight (dummy if !QK_NORM)
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
     q_stride: Int,
@@ -1615,11 +1792,12 @@ def attn_cached_rope_kernel[
     (and its rotated-Q buffer) into attention at decode. With HALF=HEAD_DIM/2 the Q
     register chunk c pairs element-wise with chunk c+NVEC/2, so qreg is rotated in
     place with vectorized cos/sin (no extra registers). Qwen3 applies q_norm/RMS per
-    head pre-rotation. Bit-parity with rope_q + attn_cached (same split-half θ)."""
+    head pre-rotation. Bit-parity with rope_q + attn_cached (same split-half θ).
+    """
     comptime assert Q.flat_rank == 1
     comptime VEC = 8
     comptime NVEC = HEAD_DIM // VEC
-    comptime HALFC = NVEC // 2                  # chunks per half (HALF = HALFC*VEC)
+    comptime HALFC = NVEC // 2  # chunks per half (HALF = HALFC*VEC)
     comptime GROUP = HQ // HKV
     var qh = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -1684,16 +1862,20 @@ def attn_cached_rope_kernel[
                 O[obase + c * VEC + e] = rebind[O.ElementType](a / l_g)
 
 
-comptime FLASH_BK = WARP_SIZE   # flash keys per tile = one per lane
+comptime FLASH_BK = WARP_SIZE  # flash keys per tile = one per lane
 
 
 def flash_attn_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int, PW: Int
 ](
-    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] rotated, row = abs pos
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM]
-    O: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM]
+    Q: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] rotated, row = abs pos
+    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
 ):
@@ -1724,8 +1906,12 @@ def flash_attn_kernel[
     comptime GROUP = HQ // HKV
     comptime NWARP = PW * GROUP
     comptime NTHREAD = NWARP * WARP_SIZE
-    var Ks = stack_allocation[FLASH_BK * HEAD_DIM, Float32, address_space = AddressSpace.SHARED]()
-    var Vs = stack_allocation[FLASH_BK * HEAD_DIM, Float32, address_space = AddressSpace.SHARED]()
+    var Ks = stack_allocation[
+        FLASH_BK * HEAD_DIM, Float32, address_space=AddressSpace.SHARED
+    ]()
+    var Vs = stack_allocation[
+        FLASH_BK * HEAD_DIM, Float32, address_space=AddressSpace.SHARED
+    ]()
 
     var tib = Int(thread_idx.x)
     var warp = tib // WARP_SIZE
@@ -1733,8 +1919,8 @@ def flash_attn_kernel[
     var blk = Int(block_idx.x)
     var kvh = blk % HKV
     var q0 = (blk // HKV) * PW
-    var qi = warp // GROUP          # query position within the tile (0 … PW-1)
-    var gi = warp % GROUP           # head within the kv-group (0 … GROUP-1)
+    var qi = warp // GROUP  # query position within the tile (0 … PW-1)
+    var gi = warp % GROUP  # head within the kv-group (0 … GROUP-1)
     var t = q0 + qi
     var h = kvh * GROUP + gi
     var qpos = q_offset + t
@@ -1785,7 +1971,9 @@ def flash_attn_kernel[
                 var p = exp(score - m_new)
                 lsum = lsum * corr + p
                 for c in range(NVEC):
-                    accv[c] = accv[c] * corr + p * Vs.load[width=VEC](kb + c * VEC)
+                    accv[c] = accv[c] * corr + p * Vs.load[width=VEC](
+                        kb + c * VEC
+                    )
                 m = m_new
         barrier()
         kt0 += FLASH_BK
@@ -1805,15 +1993,19 @@ def flash_attn_kernel[
 def tc_attn_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int
 ](
-    Q: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
-    Kc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM] rotated, row = abs pos
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],    # [max, HKV, HEAD_DIM]
-    O: TileTensor[DType.float32, LT, MutAnyOrigin],     # [Tq, HQ, HEAD_DIM]
+    Q: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
+    Kc: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # [max, HKV, HEAD_DIM] rotated, row = abs pos
+    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
-    scale_in: Float32 = -1.0,    # softmax scale; <0 = 1/sqrt(HEAD_DIM) (Qwen), Gemma passes 1.0
-    window: Int = 0,             # >0 = sliding window: attend only to the last `window`
-                                 #   keys (Gemma's sliding layers, 1024); 0 = full causal.
+    scale_in: Float32 = -1.0,  # softmax scale; <0 = 1/sqrt(HEAD_DIM) (Qwen), Gemma passes 1.0
+    window: Int = 0,  # >0 = sliding window: attend only to the last `window`
+    #   keys (Gemma's sliding layers, 1024); 0 = full causal.
 ):
     """TENSOR-CORE causal GQA attention for *prefill* — the big long-prefill lever.
 
@@ -1833,7 +2025,7 @@ def tc_attn_kernel[
     (a per-lane divergent guard around the unrolled MMA accumulate miscompiles on
     this toolchain, silently corrupting the first output d-tile)."""
     comptime assert Q.flat_rank == 1
-    comptime ND = HEAD_DIM // _MMA8                # d-tiles
+    comptime ND = HEAD_DIM // _MMA8  # d-tiles
     comptime GROUP = HQ // HKV
     var lane = Int(thread_idx.x) % 32
     var fl = _frag8_layout(lane)
@@ -1848,7 +2040,7 @@ def tc_attn_kernel[
     var scale = scale_in if scale_in >= 0.0 else 1.0 / sqrt(Float32(HEAD_DIM))
 
     var row = q0 + frow
-    var qpos = q_offset + row                      # this lane's row abs position
+    var qpos = q_offset + row  # this lane's row abs position
     # max abs position any active query in this tile attends to (block-uniform)
     var last_row = q0 + _MMA8 - 1
     if last_row > Tq - 1:
@@ -1864,7 +2056,9 @@ def tc_attn_kernel[
     comptime for dt in range(ND):
         var af = SIMD[DType.float32, _FRAG8](0)
         if row < Tq:
-            af = (qp + (row * HQ + h) * HEAD_DIM + dt * _MMA8 + fcol).load[width=_FRAG8]()
+            af = (qp + (row * HQ + h) * HEAD_DIM + dt * _MMA8 + fcol).load[
+                width=_FRAG8
+            ]()
         afrag[dt] = af
 
     var ofrag = InlineArray[SIMD[DType.float32, _FRAG8], ND](
@@ -1888,7 +2082,7 @@ def tc_attn_kernel[
         var sfrag = SIMD[DType.float32, _FRAG8](0)
         comptime for dt in range(ND):
             var bk = SIMD[DType.float32, _FRAG8](0)
-            var kd = dt * _MMA8 + frow             # d index for the B (Kᵀ) operand
+            var kd = dt * _MMA8 + frow  # d index for the B (Kᵀ) operand
             comptime for s in range(_FRAG8):
                 var key = kt + fcol + s
                 if key <= kmax:
@@ -1921,7 +2115,9 @@ def tc_attn_kernel[
         comptime for dt in range(ND):
             var bv = SIMD[DType.float32, _FRAG8](0)
             comptime for s in range(_FRAG8):
-                bv[s] = vp[(key_a * HKV + kvh) * HEAD_DIM + dt * _MMA8 + fcol + s]
+                bv[s] = vp[
+                    (key_a * HKV + kvh) * HEAD_DIM + dt * _MMA8 + fcol + s
+                ]
             ofrag[dt] = _mma8x8(pfrag, bv, ofrag[dt])
 
         m = m_new
@@ -1931,4 +2127,6 @@ def tc_attn_kernel[
         var ob = (row * HQ + h) * HEAD_DIM
         comptime for dt in range(ND):
             comptime for s in range(_FRAG8):
-                O[ob + dt * _MMA8 + fcol + s] = rebind[O.ElementType](ofrag[dt][s] / l)
+                O[ob + dt * _MMA8 + fcol + s] = rebind[O.ElementType](
+                    ofrag[dt][s] / l
+                )

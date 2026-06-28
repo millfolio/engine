@@ -13,7 +13,9 @@ from runtime.engine import new_session, upload_ids
 from runtime.tensor_ops import probe_simd_gemm
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
-comptime IDS = "/Users/mseritan/dev/millfolio/engine/.scratch/e2b_corpus_ids.txt"
+comptime IDS = (
+    "/Users/mseritan/dev/millfolio/engine/.scratch/e2b_corpus_ids.txt"
+)
 
 
 def main() raises:
@@ -54,7 +56,9 @@ def main() raises:
         var ids_dev = upload_ids(ctx, ids)
         var h = gw.embed_prompt(ctx, ids_dev, T)
         for l in range(cfg.nlayers):
-            h = gw.run_layer(ctx, l, h, s.kcs, s.vcs, T, 0, s.cache_len, s.dummy)
+            h = gw.run_layer(
+                ctx, l, h, s.kcs, s.vcs, T, 0, s.cache_len, s.dummy
+            )
         var targets = List[Int]()
         for i in range(1, T):
             targets.append(ids[i])
@@ -69,6 +73,6 @@ def main() raises:
 
     var mean = total_nll / Float64(total_tok)
     print("\n=== e2b", "int4" if q4 else "bf16", "===")
-    print("  PPL     =", 2.718281828459045 ** mean)
+    print("  PPL     =", 2.718281828459045**mean)
     print("  mean_nll=", mean, " nats/token")
     print("  tokens  =", total_tok, " over", nwin, "windows")

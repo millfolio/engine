@@ -15,13 +15,41 @@ comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--g
 def main() raises:
     var ctx = DeviceContext()
     print("loading e2b bf16…")
-    var gw = load_e2b_weights(ctx, SNAP, True)   # INT4 — does quantization break calibration?
+    var gw = load_e2b_weights(
+        ctx, SNAP, True
+    )  # INT4 — does quantization break calibration?
     gw.simd_ok = probe_simd_gemm(ctx)
     var cfg = gw.config()
 
-    var ids: List[Int] = [2, 818, 7578, 200258, 568, 1708, 834, 625, 795, 577,
-                          13139, 531, 8988, 529, 1515, 236768, 691, 1520, 44260,
-                          496, 544, 1488, 785, 4217, 531, 775, 236761]
+    var ids: List[Int] = [
+        2,
+        818,
+        7578,
+        200258,
+        568,
+        1708,
+        834,
+        625,
+        795,
+        577,
+        13139,
+        531,
+        8988,
+        529,
+        1515,
+        236768,
+        691,
+        1520,
+        44260,
+        496,
+        544,
+        1488,
+        785,
+        4217,
+        531,
+        775,
+        236761,
+    ]
     var T = len(ids)
     var s = new_session(ctx, 64, cfg.nlayers, cfg.nkv)
     var ids_dev = upload_ids(ctx, ids)
@@ -41,4 +69,4 @@ def main() raises:
         nll += -Float64(lp[i])
     print("]")
     var mean = nll / Float64(len(lp))
-    print("MILLFOLIO_E2B mean_nll=", mean, " PPL=", 2.718281828459045 ** mean)
+    print("MILLFOLIO_E2B mean_nll=", mean, " PPL=", 2.718281828459045**mean)

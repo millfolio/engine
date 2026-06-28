@@ -6,7 +6,13 @@ LM head. `pixi run e2b-timing`."""
 from std.time import perf_counter_ns
 from std.gpu.host import DeviceContext
 from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
-from runtime.engine import new_session, upload_ids, argmax_f, sess_prefill, Session
+from runtime.engine import (
+    new_session,
+    upload_ids,
+    argmax_f,
+    sess_prefill,
+    Session,
+)
 from runtime.tensor_ops import DevBuf, probe_simd_gemm
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
@@ -33,7 +39,9 @@ def main() raises:
         var one = upload_ids(ctx, [tok])
         var h = gw.embed_prompt(ctx, one, 1)
         for l in range(cfg.nlayers):
-            h = gw.run_layer(ctx, l, h, s.kcs, s.vcs, 1, s.pos, s.cache_len, s.dummy)
+            h = gw.run_layer(
+                ctx, l, h, s.kcs, s.vcs, 1, s.pos, s.cache_len, s.dummy
+            )
         _ = gw.lm_logits(ctx, h, 1, s.dummy)
     s.pos = len(prompt)
     for _ in range(reps):
@@ -43,7 +51,9 @@ def main() raises:
         ctx.synchronize()
         var b = perf_counter_ns()
         for l in range(cfg.nlayers):
-            h = gw.run_layer(ctx, l, h, s.kcs, s.vcs, 1, s.pos, s.cache_len, s.dummy)
+            h = gw.run_layer(
+                ctx, l, h, s.kcs, s.vcs, 1, s.pos, s.cache_len, s.dummy
+            )
         ctx.synchronize()
         var c = perf_counter_ns()
         _ = gw.lm_logits(ctx, h, 1, s.dummy)
@@ -52,9 +62,16 @@ def main() raises:
         t_layers += Float64(c - b) / 1.0e6
         t_head += Float64(d - c) / 1.0e6
         t_total += Float64(d - a) / 1.0e6
-        s.pos = len(prompt)   # keep cache position fixed for the bench
+        s.pos = len(prompt)  # keep cache position fixed for the bench
     print("e2b M=1 forward (avg of ", reps, "):", sep="")
     print("  embed+PLE-setup: ", t_embed / Float64(reps), " ms", sep="")
-    print("  35-layer loop:   ", t_layers / Float64(reps), " ms (", t_layers / Float64(reps) / 35.0, " ms/layer)", sep="")
+    print(
+        "  35-layer loop:   ",
+        t_layers / Float64(reps),
+        " ms (",
+        t_layers / Float64(reps) / 35.0,
+        " ms/layer)",
+        sep="",
+    )
     print("  LM head:         ", t_head / Float64(reps), " ms", sep="")
     print("  TOTAL:           ", t_total / Float64(reps), " ms", sep="")

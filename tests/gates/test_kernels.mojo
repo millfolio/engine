@@ -50,7 +50,9 @@ def run_matmul(ctx: DeviceContext, dir: String) raises -> Bool:
     var N = meta[2]
     var use_bias = meta[3]
     var x = upload_f32(ctx, read_f32(dir + "/x.bin"))
-    var w = upload_bf16(ctx, read_f32(dir + "/W.bin"))   # weights are bf16 on device
+    var w = upload_bf16(
+        ctx, read_f32(dir + "/W.bin")
+    )  # weights are bf16 on device
     var b = upload_f32(ctx, read_f32(dir + "/b.bin"))
     var y = mm(ctx, x, w, b, M, K, N, use_bias)
     ctx.synchronize()
@@ -84,18 +86,22 @@ def main() raises:
 
     var all_ok = True
     var names = [
-        String("syn_rmsnorm"), String("syn_matmul"), String("syn_swiglu"),
-        String("real_rmsnorm"), String("real_matmul"), String("real_swiglu"),
+        String("syn_rmsnorm"),
+        String("syn_matmul"),
+        String("syn_swiglu"),
+        String("real_rmsnorm"),
+        String("real_matmul"),
+        String("real_swiglu"),
     ]
     for name in names:
         var dir = root + name
         if not exists(dir + "/meta.txt"):
             print("  ", dir, " [skipped — run kernels-capture]", sep="")
             continue
-        var ok = (
-            run_rmsnorm(ctx, dir) if name.endswith("rmsnorm")
-            else run_matmul(ctx, dir) if name.endswith("matmul")
-            else run_swiglu(ctx, dir)
+        var ok = run_rmsnorm(ctx, dir) if name.endswith(
+            "rmsnorm"
+        ) else run_matmul(ctx, dir) if name.endswith("matmul") else run_swiglu(
+            ctx, dir
         )
         all_ok = all_ok and ok
 

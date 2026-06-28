@@ -12,7 +12,13 @@ from std.math import log, exp
 from std.gpu.host import DeviceContext
 
 from model import (
-    load_weights, new_session, sess_prefill, sess_step, argmax_f, EOS1, EOS2,
+    load_weights,
+    new_session,
+    sess_prefill,
+    sess_step,
+    argmax_f,
+    EOS1,
+    EOS2,
 )
 from tokenizer import load_tokenizer
 from chat import load_chat_template, render_chat
@@ -26,6 +32,7 @@ def read_text(path: String) raises -> String:
     with open(path, "r") as f:
         return f.read()
 
+
 def to_bytes(s: String) -> List[UInt8]:
     var out = List[UInt8]()
     var sb = s.as_bytes()
@@ -34,19 +41,28 @@ def to_bytes(s: String) -> List[UInt8]:
     return out^
 
 
-def kl_top1(p: List[Float32], q: List[Float32]) raises -> Tuple[Float64, Int, Int]:
+def kl_top1(
+    p: List[Float32], q: List[Float32]
+) raises -> Tuple[Float64, Int, Int]:
     var n = len(p)
-    var pm = Float32(-1.0e30); var qm = Float32(-1.0e30)
-    var pi = 0; var qi = 0
+    var pm = Float32(-1.0e30)
+    var qm = Float32(-1.0e30)
+    var pi = 0
+    var qi = 0
     for i in range(n):
         if p[i] > pm:
-            pm = p[i]; pi = i
+            pm = p[i]
+            pi = i
         if q[i] > qm:
-            qm = q[i]; qi = i
-    var pz = Float64(0.0); var qz = Float64(0.0)
+            qm = q[i]
+            qi = i
+    var pz = Float64(0.0)
+    var qz = Float64(0.0)
     for i in range(n):
-        pz += exp(Float64(p[i] - pm)); qz += exp(Float64(q[i] - qm))
-    var lpz = log(pz); var lqz = log(qz)
+        pz += exp(Float64(p[i] - pm))
+        qz += exp(Float64(q[i] - qm))
+    var lpz = log(pz)
+    var lqz = log(qz)
     var kl = Float64(0.0)
     for i in range(n):
         var lp = Float64(p[i] - pm) - lpz
@@ -59,9 +75,16 @@ def kl_top1(p: List[Float32], q: List[Float32]) raises -> Tuple[Float64, Int, In
 def main() raises:
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
-        ckpt = String(String(read_text("tests/fixtures/forward/meta.txt").split("\n")[1]).strip())
+        ckpt = String(
+            String(
+                read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
+            ).strip()
+        )
 
-    var user = String("Explain how a hash map works and why lookups are fast. Then write a short Python example.")
+    var user = String(
+        "Explain how a hash map works and why lookups are fast. Then write a"
+        " short Python example."
+    )
     var tok = load_tokenizer("tests/fixtures/tokenizer/")
     var tmpl = load_chat_template(TEMPLATE)
     var ids = tok.encode(to_bytes(render_chat(tmpl, user)))
@@ -75,11 +98,13 @@ def main() raises:
     var ref_lg = List[List[Float32]]()
     var lg = sess_prefill(ctx, wb, s, ids)
     var nxt = argmax_f(lg)
-    ref_lg.append(lg.copy()); ref_tok.append(nxt)
+    ref_lg.append(lg.copy())
+    ref_tok.append(nxt)
     while len(ref_tok) < MAX_NEW and nxt != EOS1 and nxt != EOS2:
         lg = sess_step(ctx, wb, s, nxt)
         nxt = argmax_f(lg)
-        ref_lg.append(lg.copy()); ref_tok.append(nxt)
+        ref_lg.append(lg.copy())
+        ref_tok.append(nxt)
     var nsteps = len(ref_tok)
 
     # wired int4: teacher-force the bf16 tokens, compare distributions
@@ -98,7 +123,14 @@ def main() raises:
             lg2 = sess_step(ctx, wq, s2, ref_tok[t])
 
     print("  arch=", wq.arch, " quant=", wq.quant, " steps=", nsteps)
-    print("  top-1 agreement vs bf16: ", top1, "/", nsteps,
-          " (", Float64(top1) / Float64(nsteps) * 100.0, "%)")
+    print(
+        "  top-1 agreement vs bf16: ",
+        top1,
+        "/",
+        nsteps,
+        " (",
+        Float64(top1) / Float64(nsteps) * 100.0,
+        "%)",
+    )
     print("  mean KL(bf16||int4): ", kl_sum / Float64(nsteps), " nats")
     print("  expected (gate g128): 0.5B ~73% / KL~0.33,  3B ~85% / KL~0.16")

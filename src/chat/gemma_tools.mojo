@@ -17,7 +17,7 @@ nullable, required — the macro branches.
 
 from value import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
 
-comptime Q = "<|\"|>"   # the gemma quote control token
+comptime Q = '<|"|>'  # the gemma quote control token
 
 
 def _upper(s: String) -> String:
@@ -49,7 +49,9 @@ def dictsort(v: Value) -> List[Int]:
     for i in range(1, len(idx)):
         var j = i
         while j > 0 and _less(v.c[].keys[idx[j]], v.c[].keys[idx[j - 1]]):
-            var t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t
+            var t = idx[j]
+            idx[j] = idx[j - 1]
+            idx[j - 1] = t
             j -= 1
     return idx^
 
@@ -93,7 +95,8 @@ def _scalar(v: Value) -> String:
 
 
 def _str_list(v: Value) -> String:
-    """`<|"|>a<|"|>,<|"|>b<|"|>` for a list of strings (required[]/enum-as-required)."""
+    """`<|"|>a<|"|>,<|"|>b<|"|>` for a list of strings (required[]/enum-as-required).
+    """
     var out = String("")
     for i in range(len(v.c[].vals)):
         if i > 0:
@@ -135,8 +138,13 @@ comptime _STD_KEYS = "description type properties required nullable"
 
 
 def _is_standard(key: String) -> Bool:
-    return (key == "description" or key == "type" or key == "properties"
-            or key == "required" or key == "nullable")
+    return (
+        key == "description"
+        or key == "type"
+        or key == "properties"
+        or key == "required"
+        or key == "nullable"
+    )
 
 
 def _format_items(items: Value) raises -> String:
@@ -266,5 +274,9 @@ def format_gemma_tools(tools: Value) raises -> String:
     """The full system-block tool segment: each tool wrapped <|tool>…<tool|>."""
     var out = String("")
     for i in range(len(tools.c[].vals)):
-        out += "<|tool>" + format_function_declaration(tools.c[].vals[i]) + "<tool|>"
+        out += (
+            "<|tool>"
+            + format_function_declaration(tools.c[].vals[i])
+            + "<tool|>"
+        )
     return out^

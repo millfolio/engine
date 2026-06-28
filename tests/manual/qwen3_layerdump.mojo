@@ -13,7 +13,9 @@ comptime SNAP_8B = "/Users/mseritan/.cache/huggingface/hub/models--Qwen--Qwen3-8
 comptime SNAP_14B = "/Users/mseritan/.cache/huggingface/hub/models--Qwen--Qwen3-14B/snapshots/40c069824f4251a91eefaf281ebe4c544efd3e18"
 
 
-def dump(ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String) raises:
+def dump(
+    ctx: DeviceContext, mut h: DevBuf, T: Int, hd: Int, label: String
+) raises:
     ctx.synchronize()
     var ss = Float64(0.0)
     var amax = Float64(0.0)
@@ -40,8 +42,22 @@ def main() raises:
     var w = load_weights(ctx, snap, q4)
     w.simd_ok = probe_simd_gemm(ctx)
     var hd = w.hidden
-    print("arch=", w.arch, " hidden=", hd, " hq=", w.hq, " hkv=", w.hkv,
-          " head_dim=", w.head_dim, " q_dim=", w.q_dim, " nlayers=", w.nlayers)
+    print(
+        "arch=",
+        w.arch,
+        " hidden=",
+        hd,
+        " hq=",
+        w.hq,
+        " hkv=",
+        w.hkv,
+        " head_dim=",
+        w.head_dim,
+        " q_dim=",
+        w.q_dim,
+        " nlayers=",
+        w.nlayers,
+    )
 
     var ids: List[Int] = [785, 6722, 315, 9625, 374, 12095, 11, 323]
     var T = len(ids)
@@ -72,4 +88,8 @@ def main() raises:
     var sm = Float64(0.0)
     for i in range(len(lp)):
         sm += Float64(lp[i])
-    print("token_logprobs (M=n): mean=", sm / Float64(len(lp)), " (-ln vocab = -11.93 => uniform)")
+    print(
+        "token_logprobs (M=n): mean=",
+        sm / Float64(len(lp)),
+        " (-ln vocab = -11.93 => uniform)",
+    )

@@ -52,7 +52,8 @@ def main() raises:
         ckpt = String(CACHE_CKPT)
     if not exists(ckpt):
         raise Error(
-            "checkpoint not found: " + ckpt
+            "checkpoint not found: "
+            + ckpt
             + "\nset $QWEN_SAFETENSORS to the Qwen3-Embedding-0.6B"
             + " .safetensors file or snapshot dir"
         )
@@ -66,18 +67,33 @@ def main() raises:
     var w = load_weights(ctx, ckpt)
     if w.arch != 2:
         raise Error(
-            "loaded checkpoint is not Qwen3-Embedding (arch=" + String(w.arch)
+            "loaded checkpoint is not Qwen3-Embedding (arch="
+            + String(w.arch)
             + "); expected arch=2"
         )
-    print("  arch=", w.arch, " hidden=", w.hidden, " q_dim=", w.q_dim,
-          " heads=", w.hq, "/", w.hkv, " head_dim=", w.head_dim,
-          " layers=", w.nlayers, sep="")
+    print(
+        "  arch=",
+        w.arch,
+        " hidden=",
+        w.hidden,
+        " q_dim=",
+        w.q_dim,
+        " heads=",
+        w.hq,
+        "/",
+        w.hkv,
+        " head_dim=",
+        w.head_dim,
+        " layers=",
+        w.nlayers,
+        sep="",
+    )
 
     var worst_cos = Float32(1.0)
     var worst_diff = Float32(0.0)
     var n_samples = 0
     var all_ok = True
-    var off = 0   # byte cursor into expected.bin
+    var off = 0  # byte cursor into expected.bin
 
     for li in range(len(id_lines)):
         var line = String(String(id_lines[li]).strip())
@@ -90,14 +106,20 @@ def main() raises:
         off += 4
         if D != w.hidden:
             raise Error(
-                "fixture dim " + String(D) + " != model hidden "
+                "fixture dim "
+                + String(D)
+                + " != model hidden "
                 + String(w.hidden)
             )
 
         var got = sess_embed(ctx, w, ids)
         if len(got) != D:
-            raise Error("sess_embed returned " + String(len(got))
-                        + " floats, expected " + String(D))
+            raise Error(
+                "sess_embed returned "
+                + String(len(got))
+                + " floats, expected "
+                + String(D)
+            )
 
         # cosine similarity + max-abs-diff vs the reference unit vector. Both are
         # already L2-normalized, so cos = dot; we still divide by norms for safety.
@@ -125,18 +147,40 @@ def main() raises:
         if maxd > worst_diff:
             worst_diff = maxd
         n_samples += 1
-        print("  sample ", li, ": cos=", cos, " max_abs_diff=", maxd,
-              "  " + ("OK" if ok else "FAIL"), sep="")
+        print(
+            "  sample ",
+            li,
+            ": cos=",
+            cos,
+            " max_abs_diff=",
+            maxd,
+            "  " + ("OK" if ok else "FAIL"),
+            sep="",
+        )
 
     if n_samples == 0:
         raise Error("no samples read from " + dir + "ids.txt")
 
-    print("\nworst cos=", worst_cos, "  worst max_abs_diff=", worst_diff,
-          "  (", n_samples, " samples)", sep="")
+    print(
+        "\nworst cos=",
+        worst_cos,
+        "  worst max_abs_diff=",
+        worst_diff,
+        "  (",
+        n_samples,
+        " samples)",
+        sep="",
+    )
     if not all_ok:
         raise Error(
-            "embed-check FAILED — cosine below " + String(COS_MIN)
+            "embed-check FAILED — cosine below "
+            + String(COS_MIN)
             + " for at least one sample"
         )
-    print("embed-check: PASS — all ", n_samples,
-          " samples cos >= ", COS_MIN, sep="")
+    print(
+        "embed-check: PASS — all ",
+        n_samples,
+        " samples cos >= ",
+        COS_MIN,
+        sep="",
+    )

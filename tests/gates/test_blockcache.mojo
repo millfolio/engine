@@ -18,11 +18,13 @@ def fill(ctx: DeviceContext, mut buf: DevBuf, base: Float32, n: Int) raises:
             h[i] = base + Float32(i) * 0.5
     ctx.synchronize()
 
+
 def clobber(ctx: DeviceContext, mut buf: DevBuf, n: Int) raises:
     with buf.map_to_host() as h:
         for i in range(n):
             h[i] = -7.0
     ctx.synchronize()
+
 
 def checksum(ctx: DeviceContext, mut buf: DevBuf, n: Int) raises -> Float64:
     var s = Float64(0.0)
@@ -37,7 +39,7 @@ def main() raises:
     var B = 4
     var nkv = 8
     var nlayers = 5
-    var npos = 12            # 3 full blocks
+    var npos = 12  # 3 full blocks
     var clen = npos * nkv
     var ok = True
 
@@ -59,37 +61,47 @@ def main() raises:
     for t in range(npos):
         ids.append(2000 + t * 13)
 
-    var cache = BlockCache(".scratch/kvstore_gate", B, nkv, nlayers, 1 << 30, "test/model")
+    var cache = BlockCache(
+        ".scratch/kvstore_gate", B, nkv, nlayers, 1 << 30, "test/model"
+    )
     if not cache.enabled:
         raise Error("cache failed to init")
     var hashes = cache.chained_hashes(ids)
 
     if len(hashes) != 3:
-        print("  FAIL: expected 3 blocks, got", len(hashes)); ok = False
+        print("  FAIL: expected 3 blocks, got", len(hashes))
+        ok = False
 
     var h2 = cache.chained_hashes(ids)
     for i in range(len(hashes)):
         if hashes[i] != h2[i]:
-            print("  FAIL: hash not deterministic at", i); ok = False
+            print("  FAIL: hash not deterministic at", i)
+            ok = False
 
     cache.store_blocks(kcs, vcs, hashes, ids, 0, 3)
     cache.touch_and_evict(hashes, 3)
     if cache.longest_run(hashes, ids) != 3:
-        print("  FAIL: longest_run != 3 after store"); ok = False
+        print("  FAIL: longest_run != 3 after store")
+        ok = False
 
     for l in range(nlayers):
         clobber(ctx, kcs[l], clen)
         clobber(ctx, vcs[l], clen)
     cache.restore_blocks(kcs, vcs, hashes, 0, 3)
     for l in range(nlayers):
-        if checksum(ctx, kcs[l], clen) != pre_k[l] or checksum(ctx, vcs[l], clen) != pre_v[l]:
-            print("  FAIL: restore not bit-identical at layer", l); ok = False
+        if (
+            checksum(ctx, kcs[l], clen) != pre_k[l]
+            or checksum(ctx, vcs[l], clen) != pre_v[l]
+        ):
+            print("  FAIL: restore not bit-identical at layer", l)
+            ok = False
 
     # collision guard: a different token at block 0 must not match
     var other = ids.copy()
     other[1] = 424242
     if cache.longest_run(cache.chained_hashes(other), other) != 0:
-        print("  FAIL: collision guard — different ids matched"); ok = False
+        print("  FAIL: collision guard — different ids matched")
+        ok = False
 
     if ok:
         print("blockcache gate: PASS")

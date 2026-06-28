@@ -44,12 +44,14 @@ comptime TIMEOUT_MS = 1_800_000
 
 
 def slug(model_id: String) -> String:
-    """'Qwen/Qwen2.5-3B-Instruct' -> 'Qwen--Qwen2.5-3B-Instruct' (HF cache dir)."""
+    """'Qwen/Qwen2.5-3B-Instruct' -> 'Qwen--Qwen2.5-3B-Instruct' (HF cache dir).
+    """
     var b = model_id.as_bytes()
     var out = List[UInt8]()
     for i in range(len(b)):
-        if b[i] == 47:                  # '/'
-            out.append(45); out.append(45)
+        if b[i] == 47:  # '/'
+            out.append(45)
+            out.append(45)
         else:
             out.append(b[i])
     return String(StringSlice(unsafe_from_utf8=Span(out)))
@@ -149,8 +151,13 @@ def download_one(
         return ""
     if resp.status != 200:
         raise Error(
-            "GET " + file + " -> HTTP " + String(resp.status)
-            + " (" + resp.reason + ")"
+            "GET "
+            + file
+            + " -> HTTP "
+            + String(resp.status)
+            + " ("
+            + resp.reason
+            + ")"
         )
     var commit = resp.headers.get("x-repo-commit")
     var n = len(resp.body)
@@ -197,7 +204,13 @@ def main() raises:
     print("resolving revision...")
     var cfg = fetch(client, resolve_url(model, rev, "config.json"))
     if cfg.status != 200:
-        raise Error("config.json -> HTTP " + String(cfg.status) + " (" + cfg.reason + ")")
+        raise Error(
+            "config.json -> HTTP "
+            + String(cfg.status)
+            + " ("
+            + cfg.reason
+            + ")"
+        )
     var commit = cfg.headers.get("x-repo-commit")
     if commit.byte_length() == 0:
         # Fall back to the literal ref if HF omitted the header.
@@ -218,7 +231,9 @@ def main() raises:
 
     # 2) Weights: sharded (index.json present) or a single model.safetensors.
     print("downloading weights...")
-    var idx = fetch(client, resolve_url(model, rev, "model.safetensors.index.json"))
+    var idx = fetch(
+        client, resolve_url(model, rev, "model.safetensors.index.json")
+    )
     if idx.status == 200:
         write_bytes(snap + "/model.safetensors.index.json", idx.body)
         print("  wrote   model.safetensors.index.json")

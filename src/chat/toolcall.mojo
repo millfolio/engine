@@ -22,13 +22,13 @@ from value import Value, VSTR
 # Gemma 4 generated tool-call markers (single control tokens; decode to this
 # literal text). Args use Gemma's serialization (NOT JSON): bare keys, strings
 # quoted with the <|"|> token, bare numbers/true/false, nested {}/[].
-comptime _G_QUOTE = "<|\"|>"
+comptime _G_QUOTE = '<|"|>'
 comptime _G_OPEN = "<|tool_call>"
 comptime _G_CLOSE = "<tool_call|>"
 
 
-struct ToolCall(Movable, Copyable):
-    var name: String       # function name
+struct ToolCall(Copyable, Movable):
+    var name: String  # function name
     var arguments: String  # arguments serialized as a JSON string (OpenAI shape)
 
     def __init__(out self, var name: String, var arguments: String):
@@ -37,12 +37,16 @@ struct ToolCall(Movable, Copyable):
 
 
 struct ParsedReply(Movable):
-    var content: String        # text outside any tool block (trimmed)
-    var reasoning: String      # thinking-channel content ("" for Qwen / no channel)
+    var content: String  # text outside any tool block (trimmed)
+    var reasoning: String  # thinking-channel content ("" for Qwen / no channel)
     var calls: List[ToolCall]  # tool calls in emission order
 
-    def __init__(out self, var content: String, var reasoning: String,
-                 var calls: List[ToolCall]):
+    def __init__(
+        out self,
+        var content: String,
+        var reasoning: String,
+        var calls: List[ToolCall],
+    ):
         self.content = content^
         self.reasoning = reasoning^
         self.calls = calls^
@@ -109,7 +113,9 @@ def repair_json(s: String) -> String:
     but not everything."""
     var b = string_to_bytes(s)
     var out = List[UInt8]()
-    var stack = List[UInt8]()   # expected closers ('}'=125 / ']'=93), innermost last
+    var stack = List[
+        UInt8
+    ]()  # expected closers ('}'=125 / ']'=93), innermost last
     var in_str = False
     var esc = False
     var i = 0
@@ -120,30 +126,30 @@ def repair_json(s: String) -> String:
             out.append(ch)
             if esc:
                 esc = False
-            elif ch == 92:      # backslash
+            elif ch == 92:  # backslash
                 esc = True
-            elif ch == 34:      # closing quote
+            elif ch == 34:  # closing quote
                 in_str = False
             i += 1
             continue
-        if ch == 34:            # opening quote
+        if ch == 34:  # opening quote
             out.append(ch)
             in_str = True
             i += 1
             continue
-        if ch == 123:           # {
+        if ch == 123:  # {
             out.append(ch)
             stack.append(125)
             i += 1
             continue
-        if ch == 91:            # [
+        if ch == 91:  # [
             out.append(ch)
             stack.append(93)
             i += 1
             continue
-        if ch == 125 or ch == 93:   # } or ]
+        if ch == 125 or ch == 93:  # } or ]
             if len(stack) == 0:
-                i += 1              # stray closer — drop it
+                i += 1  # stray closer — drop it
                 continue
             var top = stack[len(stack) - 1]
             if ch == top:
@@ -160,7 +166,7 @@ def repair_json(s: String) -> String:
         out.append(ch)
         i += 1
     if in_str:
-        out.append(34)             # close an unterminated string
+        out.append(34)  # close an unterminated string
     while len(stack) > 0:
         _strip_trailing_comma(out)
         out.append(stack.pop())
@@ -234,7 +240,9 @@ def parse_tool_calls(text: String) raises -> ParsedReply:
             content += _slice(b, o, advanced)  # beyond repair — keep verbatim
         pos = advanced
 
-    return ParsedReply(String(bytes_to_string(content).strip()), String(""), calls^)
+    return ParsedReply(
+        String(bytes_to_string(content).strip()), String(""), calls^
+    )
 
 
 # ── Gemma tool-call parsing (format differs from Qwen's JSON blocks) ──────────
@@ -271,9 +279,9 @@ def _g_number(b: List[UInt8], mut i: Int) raises -> Value:
     var is_float = False
     while i < len(b):
         var c = b[i]
-        if (c >= 48 and c <= 57) or c == 45 or c == 43:        # digit - +
+        if (c >= 48 and c <= 57) or c == 45 or c == 43:  # digit - +
             i += 1
-        elif c == 46 or c == 101 or c == 69:                   # . e E
+        elif c == 46 or c == 101 or c == 69:  # . e E
             is_float = True
             i += 1
         else:
@@ -289,9 +297,9 @@ def _g_value(b: List[UInt8], mut i: Int, quote: List[UInt8]) raises -> Value:
         i += 1
     if _at(b, i, quote):
         return _g_string(b, i, quote)
-    if i < len(b) and b[i] == 123:                             # {
+    if i < len(b) and b[i] == 123:  # {
         return _g_object(b, i, quote)
-    if i < len(b) and b[i] == 91:                              # [
+    if i < len(b) and b[i] == 91:  # [
         return _g_array(b, i, quote)
     if _at(b, i, string_to_bytes(String("true"))):
         i += 4
@@ -306,44 +314,44 @@ def _g_value(b: List[UInt8], mut i: Int, quote: List[UInt8]) raises -> Value:
 
 
 def _g_object(b: List[UInt8], mut i: Int, quote: List[UInt8]) raises -> Value:
-    i += 1                                                     # consume {
+    i += 1  # consume {
     var v = Value.mapping()
     while True:
         while i < len(b) and _is_ws(b[i]):
             i += 1
-        if i >= len(b) or b[i] == 125:                         # }
+        if i >= len(b) or b[i] == 125:  # }
             break
         var ks = i
-        while i < len(b) and b[i] != 58 and b[i] != 125:       # key until ':' / '}'
+        while i < len(b) and b[i] != 58 and b[i] != 125:  # key until ':' / '}'
             i += 1
         var key = String(bytes_to_string(_slice(b, ks, i)).strip())
-        if i < len(b) and b[i] == 58:                          # consume ':'
+        if i < len(b) and b[i] == 58:  # consume ':'
             i += 1
         var val = _g_value(b, i, quote)
         v.map_set(key, val^)
         while i < len(b) and _is_ws(b[i]):
             i += 1
-        if i < len(b) and b[i] == 44:                          # consume ','
+        if i < len(b) and b[i] == 44:  # consume ','
             i += 1
-    if i < len(b) and b[i] == 125:                             # consume }
+    if i < len(b) and b[i] == 125:  # consume }
         i += 1
     return v
 
 
 def _g_array(b: List[UInt8], mut i: Int, quote: List[UInt8]) raises -> Value:
-    i += 1                                                     # consume [
+    i += 1  # consume [
     var items = List[Value]()
     while True:
         while i < len(b) and _is_ws(b[i]):
             i += 1
-        if i >= len(b) or b[i] == 93:                          # ]
+        if i >= len(b) or b[i] == 93:  # ]
             break
         items.append(_g_value(b, i, quote))
         while i < len(b) and _is_ws(b[i]):
             i += 1
         if i < len(b) and b[i] == 44:
             i += 1
-    if i < len(b) and b[i] == 93:                              # consume ]
+    if i < len(b) and b[i] == 93:  # consume ]
         i += 1
     return Value.list_of(items^)
 
@@ -361,7 +369,7 @@ def _extract_gemma_call(inner: List[UInt8], mut calls: List[ToolCall]) -> Bool:
             return False
         i += 5
         var ns = i
-        while i < n and inner[i] != 123:                       # name until '{'
+        while i < n and inner[i] != 123:  # name until '{'
             i += 1
         var name = String(bytes_to_string(_slice(inner, ns, i)).strip())
         if name.byte_length() == 0:
@@ -395,22 +403,27 @@ def _split_gemma_channels(b: List[UInt8]) raises -> Tuple[String, String]:
             var body_end = j if j >= 0 else n
             var cs = i + len(OPEN)
             var nl = cs
-            while nl < body_end and b[nl] != 10:   # first newline ends the channel label
+            while (
+                nl < body_end and b[nl] != 10
+            ):  # first newline ends the channel label
                 nl += 1
             var rstart = nl + 1 if nl < body_end else cs
             if len(reason) > 0:
-                reason.append(10)           # separate multiple channels with \n
+                reason.append(10)  # separate multiple channels with \n
             for k in range(rstart, body_end):
                 reason.append(b[k])
             if j < 0:
-                break                       # unterminated → rest was all reasoning
+                break  # unterminated → rest was all reasoning
             i = j + len(CLOSE)
         elif _at(b, i, CLOSE):
-            i += len(CLOSE)                 # stray close marker
+            i += len(CLOSE)  # stray close marker
         else:
             out.append(b[i])
             i += 1
-    return (String(bytes_to_string(out).strip()), String(bytes_to_string(reason).strip()))
+    return (
+        String(bytes_to_string(out).strip()),
+        String(bytes_to_string(reason).strip()),
+    )
 
 
 def parse_gemma_tool_calls(text: String) raises -> ParsedReply:

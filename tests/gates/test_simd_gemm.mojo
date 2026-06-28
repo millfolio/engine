@@ -54,9 +54,19 @@ def check(ctx: DeviceContext, M: Int, K: Int, N: Int, use_bias: Int) raises:
 
     # scalar is already NumPy-gated by test-kernels, so simd-vs-scalar is enough.
     var scalar_host = to_host(y_scalar, M * N)
-    var d = max_abs(y_simd, scalar_host)   # |simd - scalar|
-    print("  M=", M, " K=", K, " N=", N, " bias=", use_bias,
-          "  max|simd-scalar|=", d)
+    var d = max_abs(y_simd, scalar_host)  # |simd - scalar|
+    print(
+        "  M=",
+        M,
+        " K=",
+        K,
+        " N=",
+        N,
+        " bias=",
+        use_bias,
+        "  max|simd-scalar|=",
+        d,
+    )
     if d > TOL:
         raise Error("simd GEMM disagrees with scalar beyond tolerance")
 
@@ -67,13 +77,15 @@ def main() raises:
     var ctx = DeviceContext()
 
     if not probe_simd_gemm(ctx):
-        raise Error("probe_simd_gemm failed — AIR simdgroup intrinsics rejected")
+        raise Error(
+            "probe_simd_gemm failed — AIR simdgroup intrinsics rejected"
+        )
     print("probe_simd_gemm: OK")
 
-    check(ctx, 8, 16, 8, 0)         # single tile, partial K
-    check(ctx, 37, 44, 53, 1)       # odd M,K,N + bias (boundary masking)
-    check(ctx, 64, 128, 128, 0)     # multi-tile, clean
-    check(ctx, 130, 896, 896, 1)    # qwen-ish proj, odd M, bias
-    check(ctx, 256, 896, 4864, 0)   # mlp gate shape
+    check(ctx, 8, 16, 8, 0)  # single tile, partial K
+    check(ctx, 37, 44, 53, 1)  # odd M,K,N + bias (boundary masking)
+    check(ctx, 64, 128, 128, 0)  # multi-tile, clean
+    check(ctx, 130, 896, 896, 1)  # qwen-ish proj, odd M, bias
+    check(ctx, 256, 896, 4864, 0)  # mlp gate shape
 
     print("simd-gemm gate: PASS")
