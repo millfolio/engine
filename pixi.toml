@@ -145,6 +145,9 @@ gemma-template-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_t
 # captured HF reference. Needs the gemma checkpoint + Metal GPU. -I tests/gates:
 # imports the gate-only fixture helpers (testio).
 gemma-layer-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_layer_test.mojo -I src -I tests/gates -o build/gemma_layer_test && ./build/gemma_layer_test" }
+# Full 48-layer forward (int4, ~7 GB) vs the HF reference's final argmax — the
+# end-to-end propagation check (embedding scale, KV/RoPE, final norm, softcap).
+gemma-dump = { cmd = "mkdir -p build && mojo build tests/manual/gemma_dump.mojo -I src -I tests/gates -o build/gemma_dump && ./build/gemma_dump" }
 # Speculative-decode parity + timing: greedy `generate` vs prompt-lookup
 # `generate_spec` on Gemma 4 12B int4 (must be bit-identical; reports speedup).
 spec-decode = { cmd = "mkdir -p build && mojo build tests/manual/spec_decode.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/spec_decode && ./build/spec_decode" }
@@ -213,6 +216,11 @@ tok-capture = "python tests/manual/tokenizer_spike/capture.py"
 embed-capture = "python tests/manual/embed_spike/capture.py"
 # Dumps ids + per-layer hidden states + last-position logits from HF (CPU/f32).
 forward-capture = "python tests/manual/forward_spike/capture.py"
+# Gemma-4 12B: dump per-layer in/out hidden states + final argmax for the
+# gemma-layer-test / gemma-dump validators. One-time + memory-heavy (loads the
+# bf16 12B ~24 GB). Run:  pixi run -e oracle gemma-ref
+# See tests/manual/README-gemma-validate.md.
+gemma-ref = "python tests/manual/ppl/gemma4_layer_ref.py"
 # Dumps prompt ids + HF greedy continuation token ids.
 generate-capture = "python tests/manual/generate_spike/capture.py"
 # Dumps raw logits + context + HF's processed (id,prob) distribution.
