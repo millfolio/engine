@@ -65,6 +65,7 @@ from model import (
     ToolCall,
     BlockCache,
 )
+from models.gemma_e2b import GemmaE2bWeights, load_e2b_weights
 from tokenizer import (
     Tokenizer,
     load_tokenizer,
@@ -113,6 +114,7 @@ comptime MODEL_05B = "Qwen/Qwen2.5-0.5B-Instruct"
 comptime MODEL_3B = "Qwen/Qwen2.5-3B-Instruct"
 """Default served id for the Qwen2.5 3B chat model."""
 comptime MODEL_GEMMA = "google/gemma-4-12b-it"
+comptime MODEL_GEMMA_E2B = "google/gemma-4-e2b-it"
 """Default served id for the Gemma 4 12B chat model."""
 # Default SECONDARY embedding model (arch==2). Resolved from the HF cache when no
 # $EMBED_SAFETENSORS / config `embed_model` is given; if it isn't cached either,
@@ -195,8 +197,10 @@ struct ServerState(Movable):
     # weight-touching op dispatches once on `model.isa[…]()`; the rest of the server
     # is family-agnostic and reads per-model behavior (eos, tool style, extra stop)
     # from `cfg`. Adding a model = a Variant arm + a ModelConfig — no scattered ifs.
-    var model: Variant[Weights, GemmaWeights]
-    """The primary (chat) model weights, dispatched on via `model.isa[…]()`."""
+    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights]
+    """The primary (chat) model weights, dispatched on via `model.isa[…]()`.
+    GemmaE2bWeights is the effective-2B (PLE) Gemma-4 — a small model that fits
+    ~16 GB; GemmaWeights is the dense 12B; Weights is Qwen."""
     var cfg: ModelConfig  # the primary model's config (behavior flags + eos)
     """The primary model's config (behavior flags + eos)."""
     var primary_arch: Int  # Qwen arch (0/1/2) for the embed gate; -1 for Gemma
@@ -227,7 +231,7 @@ struct ServerState(Movable):
     def __init__(
         out self,
         var ctx: DeviceContext,
-        var model: Variant[Weights, GemmaWeights],
+        var model: Variant[Weights, GemmaWeights, GemmaE2bWeights],
         cfg: ModelConfig,
         primary_arch: Int,
         max_seq: Int,
@@ -555,6 +559,10 @@ def _prefill_suffix(
         return sess_prefill_suffix(
             s.ctx, s.model[GemmaWeights], s.sess, suffix, reuse, True
         )
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_prefill_suffix(
+            s.ctx, s.model[GemmaE2bWeights], s.sess, suffix, reuse, True
+        )
     return sess_prefill_suffix(
         s.ctx, s.model[Weights], s.sess, suffix, reuse, True
     )
@@ -563,6 +571,8 @@ def _prefill_suffix(
 def _step(mut s: ServerState, token: Int) raises -> List[Float32]:
     if s.model.isa[GemmaWeights]():
         return sess_step(s.ctx, s.model[GemmaWeights], s.sess, token)
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_step(s.ctx, s.model[GemmaE2bWeights], s.sess, token)
     return sess_step(s.ctx, s.model[Weights], s.sess, token)
 
 
@@ -571,6 +581,8 @@ def _verify(mut s: ServerState, batch: List[Int]) raises -> List[Float32]:
     session's current pos (does NOT advance pos)."""
     if s.model.isa[GemmaWeights]():
         return sess_verify(s.ctx, s.model[GemmaWeights], s.sess, batch)
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_verify(s.ctx, s.model[GemmaE2bWeights], s.sess, batch)
     return sess_verify(s.ctx, s.model[Weights], s.sess, batch)
 
 
@@ -589,6 +601,10 @@ def _token_logprobs(
     s.cached = List[Int]()
     if s.model.isa[GemmaWeights]():
         return sess_token_logprobs(s.ctx, s.model[GemmaWeights], s.sess, tokens)
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_token_logprobs(
+            s.ctx, s.model[GemmaE2bWeights], s.sess, tokens
+        )
     return sess_token_logprobs(s.ctx, s.model[Weights], s.sess, tokens)
 
 
@@ -2131,6 +2147,18 @@ def _detect_family(ckpt_dir: String) raises -> Int:
     return FAMILY_QWEN
 
 
+def _is_e2b_ckpt(ckpt_dir: String) raises -> Bool:
+    """Distinguish the effective-2B (PLE) Gemma-4 from the dense 12B: e2b has
+    hidden_size 1536 (dense is 3840) and its checkpoints are named `*e2b*`. Only
+    consulted for FAMILY_GEMMA checkpoints."""
+    if ckpt_dir.find("e2b") != -1 or ckpt_dir.find("E2B") != -1:
+        return True
+    var cfg = ckpt_dir + "/config.json"
+    if exists(cfg) and read_text(cfg).find('"hidden_size": 1536') != -1:
+        return True
+    return False
+
+
 def _dirname(path: String) -> String:
     """Directory component of `path` (everything before the last '/'), or '.'.
     """
@@ -2389,9 +2417,38 @@ def main() raises:
     var p_simd_ok: Bool
     var p_maxseq: Int
     var p_cfg: ModelConfig
-    var model: Variant[Weights, GemmaWeights]
+    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights]
     var gemm_path = String("simdgroup-matrix (~4.5x)")
-    if family == FAMILY_GEMMA:
+    if family == FAMILY_GEMMA and _is_e2b_ckpt(ckpt_dir):
+        # Gemma-4 effective-2B (PLE + KV-sharing). int4 by default (~1.4 GB) — a
+        # small model that fits ~16 GB. Same gemma tokenizer/template as the 12B.
+        var ew = load_e2b_weights(ctx, ckpt_dir)  # q4=True default
+        ew.simd_ok = probe_simd_gemm(ctx)
+        p_cfg = ew.config()
+        p_nlayers = p_cfg.nlayers
+        p_nkv = p_cfg.nkv
+        p_arch = -1
+        p_quant = True
+        p_simd_ok = ew.simd_ok
+        p_maxseq = GEMMA_MAX_SEQ
+        if not ew.simd_ok:
+            gemm_path = String("scalar tiled (simd probe failed)")
+        if model_id.byte_length() == 0:
+            model_id = String(MODEL_GEMMA_E2B) + "-int4"
+        print(
+            "  serving ",
+            model_id,
+            "  (e2b: hidden=",
+            ew.hidden,
+            ", layers=",
+            p_nlayers,
+            ", PLE + KV-share, max_seq=",
+            p_maxseq,
+            ")",
+            sep="",
+        )
+        model = ew^
+    elif family == FAMILY_GEMMA:
         # The 12B bf16 model is ~24 GB and won't fit a 24 GB GPU, so int4 is forced.
         var alllayers = List[Int]()
         for i in range(G_NLAYERS):
