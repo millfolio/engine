@@ -15,6 +15,15 @@ The commit hash is read from the `X-Repo-Commit` response header HF sends on eve
 `/resolve/<rev>/...` request, so a moving ref like `main` is pinned to the exact
 revision actually downloaded.
 
+Integrity: every git-LFS file (the safetensors weights) is verified by sha256
+before it is written to disk. HF publishes each LFS file's sha256 as `lfs.oid` in
+the model tree API (`/api/models/<repo>/tree/<commit>`); we recompute the sha256
+of the downloaded bytes and refuse to write on a mismatch. A `Content-Length`
+match alone only rules out truncation — it can't detect a tampered or poisoned
+weight, and safetensors carry no embedded signature. Non-LFS blobs (config.json,
+tokenizer assets) have no published content sha256 (their tree `oid` is a git
+SHA-1 of the blob, not a sha256 of the bytes), so those keep the size check only.
+
 Files fetched:
   - config.json, generation_config.json          (always)
   - model.safetensors                            (single-file: 0.5B)
@@ -35,6 +44,7 @@ from std.sys import argv
 from std.os import getenv, makedirs
 from std.os.path import exists, getsize
 from flare.http import HttpClient, Response
+from hashing import sha256_hex, hf_lfs_sha256
 
 
 comptime DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -189,10 +199,18 @@ def download_one(
     file: String,
     snap_dir: String,
     optional: Bool,
+    expected_sha256: String = "",
 ) raises -> String:
     """Download <repo>/<rev>/<file> into snap_dir. Skips if already present.
     Returns the X-Repo-Commit header (so the caller can pin the snapshot), or ""
     if an optional file was absent (404).
+
+    When `expected_sha256` is a 64-char hex sha256 (the file's git-LFS `lfs.oid`),
+    the downloaded bytes are hashed and compared BEFORE being written — a mismatch
+    raises and nothing is persisted, so a tampered/poisoned weight never lands on
+    disk. Any other value (empty, or a non-sha256 length) skips hash verification
+    and the size check remains the only guard (e.g. non-LFS blobs, whose content
+    sha256 HF does not publish).
 
     Args:
         client: The HTTP client to use.
@@ -201,19 +219,23 @@ def download_one(
         file: The file path within the repo.
         snap_dir: The snapshot directory to write the file into.
         optional: If True, a 404 is tolerated and skipped instead of raising.
+        expected_sha256: The expected sha256 (lowercase hex) of the file's bytes,
+            or "" to skip hash verification.
 
     Returns:
         The X-Repo-Commit header value, or "" if the file was skipped or absent.
 
     Raises:
-        Error: if a required file returns a non-200, non-404 HTTP status, or the
-            write fails.
+        Error: if a required file returns a non-200, non-404 HTTP status, the
+            write fails, or the downloaded bytes fail sha256 verification.
     """
     var dest = snap_dir + "/" + file
     var url = resolve_url(repo, rev, file)
     # Resume: skip only if the local file is byte-complete vs the remote. A
     # truncated or 0-byte file (e.g. an earlier interrupted/failed write) must be
-    # re-fetched, not skipped.
+    # re-fetched, not skipped. (A pre-existing complete file was already sha256-
+    # verified when a prior run wrote it, so we don't re-hash multi-GB shards on
+    # every resume.)
     if exists(dest):
         var want = remote_size(client, url)
         if want > 0 and Int(getsize(dest)) == want:
@@ -235,6 +257,21 @@ def download_one(
         )
     var commit = resp.headers.get("x-repo-commit")
     var n = len(resp.body)
+    # Integrity: verify the sha256 of the downloaded bytes against HF's published
+    # git-LFS oid BEFORE writing, so a tampered/corrupt weight is never persisted.
+    if expected_sha256.byte_length() == 64:
+        var got = sha256_hex(Span(resp.body))
+        if got != expected_sha256:
+            raise Error(
+                "SECURITY: sha256 mismatch for "
+                + file
+                + " — expected "
+                + expected_sha256
+                + " but the downloaded bytes hash to "
+                + got
+                + ". Refusing to write a tampered or corrupt weight file."
+            )
+        print("  verify ", file, "sha256 ✓")
     write_bytes(dest, resp.body)
     print("  wrote  ", file, "(", n, "bytes )")
     return commit
@@ -302,6 +339,34 @@ def main() raises:
     if not exists(snap):
         makedirs(snap)
 
+    # Fetch the model tree at the pinned commit so we know each LFS file's
+    # expected sha256 (`lfs.oid`) and can verify weights against tampering. If the
+    # tree is unavailable we degrade to the size-only check and say so loudly —
+    # rather than failing the whole install — but weights then go unverified.
+    var tree_body = List[UInt8]()
+    var tree_ok = False
+    try:
+        var tr = fetch(
+            client,
+            "https://huggingface.co/api/models/" + model + "/tree/" + commit,
+        )
+        if tr.status == 200:
+            tree_body = tr.body.copy()
+            tree_ok = True
+        else:
+            print(
+                "  WARN: tree API HTTP",
+                tr.status,
+                "— weight sha256 verification UNAVAILABLE (size check only)",
+            )
+    except:
+        print(
+            "  WARN: tree API fetch failed — weight sha256 verification"
+            " UNAVAILABLE (size check only)"
+        )
+    if tree_ok:
+        print("  manifest: got sha256 hashes for weight verification")
+
     # Write config.json into the snapshot now (we already have its bytes).
     var cfg_dest = snap + "/config.json"
     if not exists(cfg_dest):
@@ -322,9 +387,21 @@ def main() raises:
         var shards = shard_names(idx_text)
         print("  ", len(shards), "shard(s)")
         for s in range(len(shards)):
-            _ = download_one(client, model, rev, shards[s], snap, False)
+            var sha = hf_lfs_sha256(Span(tree_body), shards[s])
+            _ = download_one(
+                client, model, rev, shards[s], snap, False, expected_sha256=sha
+            )
     else:
-        _ = download_one(client, model, rev, "model.safetensors", snap, False)
+        var sha = hf_lfs_sha256(Span(tree_body), "model.safetensors")
+        _ = download_one(
+            client,
+            model,
+            rev,
+            "model.safetensors",
+            snap,
+            False,
+            expected_sha256=sha,
+        )
 
     # 3) Auxiliary + tokenizer assets (best-effort; absent files are skipped).
     print("downloading aux + tokenizer assets...")
@@ -337,7 +414,13 @@ def main() raises:
         String("special_tokens_map.json"),
     ]
     for a in range(len(aux)):
-        _ = download_one(client, model, rev, aux[a], snap, True)
+        # Aux/tokenizer assets are normally non-LFS (no published sha256 → "" →
+        # size check only), but pass the lookup anyway so any that IS an LFS file
+        # gets verified too.
+        var sha = hf_lfs_sha256(Span(tree_body), aux[a])
+        _ = download_one(
+            client, model, rev, aux[a], snap, True, expected_sha256=sha
+        )
 
     # 4) Pin the ref so hf_cache_path() resolves <hub>/models--<slug>/refs/main.
     var refs = repo_dir + "/refs"

@@ -87,10 +87,14 @@ test-toolcall = "mojo run -I ../jinja2.mojo/src -I src tests/gates/test_toolcall
 # -I ../flare for TcpListener/TcpStream/SocketAddr; -I ../json (flare uses json).
 test-server-bind = "mojo run -I src -I ../flare -I ../json tests/gates/test_server_bind.mojo"
 
+# SHA-256 + HuggingFace tree-API lfs.oid extraction (src/hashing.mojo) — the
+# weights downloader's supply-chain integrity check. Pure CPU, no GPU/weights/net.
+test-hashing = "mojo run -I src tests/gates/test_hashing.mojo"
+
 # The CI suite: the pure-CPU gates that need NO GPU, weights, or torch fixtures.
 # Run by .github/workflows/test.yml on every push/PR. (The GPU/weights gates stay
 # manual via their own tasks — see CLAUDE.md.)
-test = { depends-on = ["test-toolcall", "test-server-bind"] }
+test = { depends-on = ["test-toolcall", "test-server-bind", "test-hashing"] }
 
 # GPU gate aggregate — the weight-free Metal gates (compile a GPU kernel, then
 # matmul/RMSNorm/SwiGLU, simdgroup GEMM, and RoPE+GQA attention vs the reference).
