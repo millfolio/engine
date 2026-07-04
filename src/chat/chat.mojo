@@ -29,7 +29,7 @@ def json_escape_str(b: List[UInt8]) -> String:
     the response invalid JSON).
 
     Args:
-        b: the UTF-8 bytes to escape.
+        b: The UTF-8 bytes to escape.
 
     Returns:
         The JSON-escaped string.
@@ -68,7 +68,7 @@ def load_chat_template(path: String) raises -> Template:
     """Load and compile the Jinja chat template at `path` into a `Template`.
 
     Args:
-        path: filesystem path to the Jinja chat template.
+        path: Filesystem path to the Jinja chat template.
 
     Returns:
         The compiled `Template`.
@@ -96,9 +96,9 @@ def render_value(
     `render_gemma`; `tmpl` is ignored for Gemma.
 
     Args:
-        tmpl: the compiled Jinja chat template (ignored for Gemma).
-        req: the parsed OpenAI request value with `messages` and optional `tools`.
-        family: the model family (e.g. `FAMILY_QWEN`, `FAMILY_GEMMA`).
+        tmpl: The compiled Jinja chat template (ignored for Gemma).
+        req: The parsed OpenAI request value with `messages` and optional `tools`.
+        family: The model family (e.g. `FAMILY_QWEN`, `FAMILY_GEMMA`).
 
     Returns:
         The rendered prompt string.
@@ -130,8 +130,8 @@ def render_request(tmpl: Template, body: String) raises -> String:
     """Parse an OpenAI request body and render it (CLI / single-shot use).
 
     Args:
-        tmpl: the compiled Jinja chat template.
-        body: the OpenAI request body as a JSON string.
+        tmpl: The compiled Jinja chat template.
+        body: The OpenAI request body as a JSON string.
 
     Returns:
         The rendered prompt string.
@@ -146,8 +146,8 @@ def render_chat(tmpl: Template, user: String) raises -> String:
     """Convenience for a single user turn (the CLI), via `render_request`.
 
     Args:
-        tmpl: the compiled Jinja chat template.
-        user: the user turn's message content.
+        tmpl: The compiled Jinja chat template.
+        user: The user turn's message content.
 
     Returns:
         The rendered prompt string.

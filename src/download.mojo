@@ -49,7 +49,7 @@ def slug(model_id: String) -> String:
     """'Qwen/Qwen2.5-3B-Instruct' -> 'Qwen--Qwen2.5-3B-Instruct' (HF cache dir).
 
     Args:
-        model_id: the HuggingFace repo id to slugify.
+        model_id: The HuggingFace repo id to slugify.
 
     Returns:
         The repo id with each '/' replaced by '--'.
@@ -81,9 +81,9 @@ def resolve_url(repo: String, rev: String, file: String) -> String:
     """HuggingFace `/resolve/<rev>/<file>` download URL for `repo`.
 
     Args:
-        repo: the HuggingFace repo id.
-        rev: the revision (branch, tag, or commit) to resolve.
-        file: the file path within the repo.
+        repo: The HuggingFace repo id.
+        rev: The revision (branch, tag, or commit) to resolve.
+        file: The file path within the repo.
 
     Returns:
         The full HuggingFace resolve URL for the file.
@@ -97,7 +97,7 @@ def shard_names(index_text: String) -> List[String]:
     no JSON structural token ends in '.safetensors'.
 
     Args:
-        index_text: the raw text of the safetensors index JSON.
+        index_text: The raw text of the safetensors index JSON.
 
     Returns:
         The distinct '*.safetensors' shard filenames found in the index.
@@ -121,8 +121,8 @@ def write_bytes(path: String, data: List[UInt8]) raises:
     """Write `data` to `path`, chunking to stay under macOS write(2)'s ~2 GiB cap.
 
     Args:
-        path: the destination file path.
-        data: the bytes to write.
+        path: The destination file path.
+        data: The bytes to write.
 
     Raises:
         Error: if the file cannot be opened or written.
@@ -146,8 +146,8 @@ def fetch(mut client: HttpClient, url: String) raises -> Response:
     """GET `url` over `client` and return the full `Response`.
 
     Args:
-        client: the HTTP client to use.
-        url: the URL to GET.
+        client: The HTTP client to use.
+        url: The URL to GET.
 
     Returns:
         The full HTTP response.
@@ -164,8 +164,8 @@ def remote_size(mut client: HttpClient, url: String) -> Int:
     unknown — used to tell a complete download from a truncated/empty one.
 
     Args:
-        client: the HTTP client to use.
-        url: the URL to issue a HEAD request against.
+        client: The HTTP client to use.
+        url: The URL to issue a HEAD request against.
 
     Returns:
         The Content-Length in bytes, or -1 if unknown.
@@ -195,12 +195,12 @@ def download_one(
     if an optional file was absent (404).
 
     Args:
-        client: the HTTP client to use.
-        repo: the HuggingFace repo id.
-        rev: the revision to resolve.
-        file: the file path within the repo.
-        snap_dir: the snapshot directory to write the file into.
-        optional: if True, a 404 is tolerated and skipped instead of raising.
+        client: The HTTP client to use.
+        repo: The HuggingFace repo id.
+        rev: The revision to resolve.
+        file: The file path within the repo.
+        snap_dir: The snapshot directory to write the file into.
+        optional: If True, a 404 is tolerated and skipped instead of raising.
 
     Returns:
         The X-Repo-Commit header value, or "" if the file was skipped or absent.

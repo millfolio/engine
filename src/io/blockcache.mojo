@@ -96,12 +96,12 @@ struct BlockCache(Movable):
         `budget_bytes` and wiping it if the stamped model dims don't match.
 
         Args:
-            dir: filesystem directory holding the block store.
-            B: tokens per block.
-            nkv: number of K/V heads (key/value channels per token).
-            nlayers: number of transformer layers stored per block.
-            budget_bytes: byte budget used to size the block budget (0 = unlimited).
-            model_id: model identifier stamped into the store's meta file.
+            dir: Filesystem directory holding the block store.
+            B: Tokens per block.
+            nkv: Number of K/V heads (key/value channels per token).
+            nlayers: Number of transformer layers stored per block.
+            budget_bytes: Byte budget used to size the block budget (0 = unlimited).
+            model_id: Model identifier stamped into the store's meta file.
         """
         self.dir = dir
         self.B = B
@@ -165,7 +165,7 @@ struct BlockCache(Movable):
         """One chained hash per full B-token block of `ids` (partial tail ignored).
 
         Args:
-            ids: the token ids to hash in B-token blocks.
+            ids: The token ids to hash in B-token blocks.
 
         Returns:
             One chained FNV hash per full B-token block.
@@ -196,8 +196,8 @@ struct BlockCache(Movable):
         """Number of leading blocks present on disk (with matching token ids).
 
         Args:
-            hashes: the per-block chained hashes to look up.
-            ids: the token ids used to verify each block (collision check).
+            hashes: The per-block chained hashes to look up.
+            ids: The token ids used to verify each block (collision check).
 
         Returns:
             The count of leading blocks found on disk with matching token ids.
@@ -239,12 +239,12 @@ struct BlockCache(Movable):
         """Write blocks [a, b) from the session's K/V buffers to disk.
 
         Args:
-            kcs: per-layer key cache device buffers.
-            vcs: per-layer value cache device buffers.
-            hashes: the per-block chained hashes naming each block file.
-            ids: the token ids written as each block's header.
-            a: first block index to write (inclusive).
-            b: end block index (exclusive).
+            kcs: Per-layer key cache device buffers.
+            vcs: Per-layer value cache device buffers.
+            hashes: The per-block chained hashes naming each block file.
+            ids: The token ids written as each block's header.
+            a: First block index to write (inclusive).
+            b: End block index (exclusive).
 
         Raises:
             Error: if opening or writing a block file fails.
@@ -286,11 +286,11 @@ struct BlockCache(Movable):
         """Load blocks [a, b) from disk into the session's K/V buffers.
 
         Args:
-            kcs: per-layer key cache device buffers to fill.
-            vcs: per-layer value cache device buffers to fill.
-            hashes: the per-block chained hashes naming each block file.
-            a: first block index to load (inclusive).
-            b: end block index (exclusive).
+            kcs: Per-layer key cache device buffers to fill.
+            vcs: Per-layer value cache device buffers to fill.
+            hashes: The per-block chained hashes naming each block file.
+            a: First block index to load (inclusive).
+            b: End block index (exclusive).
 
         Raises:
             Error: if opening or reading a block file fails.
@@ -324,8 +324,8 @@ struct BlockCache(Movable):
         until within the block budget. Persist the index.
 
         Args:
-            hashes: the per-block chained hashes touched by this request.
-            nblocks: number of leading blocks from `hashes` that were accessed.
+            hashes: The per-block chained hashes touched by this request.
+            nblocks: Number of leading blocks from `hashes` that were accessed.
 
         Raises:
             Error: if persisting the index fails.

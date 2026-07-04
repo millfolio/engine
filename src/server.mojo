@@ -247,19 +247,19 @@ struct ServerState(Movable):
         """Take ownership of the loaded models, tokenizers, caches, and ids; start with an empty `cached` list.
 
         Args:
-            ctx: the GPU device context.
-            model: the primary chat model weights (Qwen or Gemma).
-            cfg: the primary model's config (behavior flags + eos).
+            ctx: The GPU device context.
+            model: The primary chat model weights (Qwen or Gemma).
+            cfg: The primary model's config (behavior flags + eos).
             primary_arch: Qwen arch (0/1/2) for the embed gate; -1 for Gemma.
-            max_seq: the primary model's KV-cache context cap, in tokens.
-            tok: tokenizer for the primary (chat) model.
-            tmpl: the primary model's chat template.
-            sess: the long-lived KV-cache session.
-            model_id: model id reported by /v1/models and every response.
-            bcache: the disk-backed prefix cache.
-            embed_w: secondary embedding model weights, or None when none is loaded.
-            embed_tok: tokenizer for the secondary embedding model, or None.
-            embed_id: id reported for the embedding model ("" when unset).
+            max_seq: The primary model's KV-cache context cap, in tokens.
+            tok: Tokenizer for the primary (chat) model.
+            tmpl: The primary model's chat template.
+            sess: The long-lived KV-cache session.
+            model_id: Model id reported by /v1/models and every response.
+            bcache: The disk-backed prefix cache.
+            embed_w: Secondary embedding model weights, or None when none is loaded.
+            embed_tok: Tokenizer for the secondary embedding model, or None.
+            embed_id: Id reported for the embedding model ("" when unset).
         """
         self.ctx = ctx^
         self.model = model^
@@ -284,7 +284,7 @@ def to_bytes(s: String) -> List[UInt8]:
     """Copy a String's UTF-8 bytes into a `List[UInt8]`.
 
     Args:
-        s: the source String.
+        s: The source String.
 
     Returns:
         A new list holding `s`'s UTF-8 bytes.
@@ -300,9 +300,9 @@ def get_int(req: Value, key: String, default: Int) -> Int:
     """Read `key` from a JSON object as an Int (truncating a float), or `default` if absent/wrong type.
 
     Args:
-        req: the JSON object Value to read from.
-        key: the key to look up.
-        default: value returned when the key is absent or not a number.
+        req: The JSON object Value to read from.
+        key: The key to look up.
+        default: Value returned when the key is absent or not a number.
 
     Returns:
         The key's value as an Int, or `default`.
@@ -321,9 +321,9 @@ def get_float(req: Value, key: String, default: Float64) -> Float64:
     """Read `key` from a JSON object as a Float64 (promoting an int), or `default` if absent/wrong type.
 
     Args:
-        req: the JSON object Value to read from.
-        key: the key to look up.
-        default: value returned when the key is absent or not a number.
+        req: The JSON object Value to read from.
+        key: The key to look up.
+        default: Value returned when the key is absent or not a number.
 
     Returns:
         The key's value as a Float64, or `default`.
@@ -342,9 +342,9 @@ def get_bool(req: Value, key: String, default: Bool) -> Bool:
     """Read `key` from a JSON object as a Bool, or `default` if absent/not a bool.
 
     Args:
-        req: the JSON object Value to read from.
-        key: the key to look up.
-        default: value returned when the key is absent or not a bool.
+        req: The JSON object Value to read from.
+        key: The key to look up.
+        default: Value returned when the key is absent or not a bool.
 
     Returns:
         The key's boolean value, or `default`.
@@ -359,8 +359,8 @@ def get_str(req: Value, key: String) -> String:
     """Read `key` from a JSON object as a String, or "" if absent/not a string.
 
     Args:
-        req: the JSON object Value to read from.
-        key: the key to look up.
+        req: The JSON object Value to read from.
+        key: The key to look up.
 
     Returns:
         The key's string value, or "" when absent or not a string.
@@ -375,7 +375,7 @@ def esc(s: String) -> String:
     """JSON-escape a String for embedding in a response body.
 
     Args:
-        s: the String to escape.
+        s: The String to escape.
 
     Returns:
         The JSON-escaped String.
@@ -389,7 +389,7 @@ def req_has_tools(req: Value) -> Bool:
     request that happens to emit the literal text is left as plain content).
 
     Args:
-        req: the parsed request object Value.
+        req: The parsed request object Value.
 
     Returns:
         True iff the request carries a non-empty `tools` array.
@@ -409,7 +409,7 @@ def responses_to_chat(bv: Value) raises -> Optional[Value]:
     rather than constructing jinja2.mojo Values by hand.
 
     Args:
-        bv: the parsed Responses-API request body.
+        bv: The parsed Responses-API request body.
 
     Returns:
         A chat-shaped Value with a `messages` array (tools forwarded when
@@ -449,7 +449,7 @@ def complete_utf8_len(b: List[UInt8]) -> Int:
     so a multibyte char split across tokens isn't emitted half-formed.
 
     Args:
-        b: the byte buffer to measure.
+        b: The byte buffer to measure.
 
     Returns:
         The length of the longest prefix of `b` ending on a UTF-8 boundary.
@@ -479,9 +479,9 @@ def slice_bytes(b: List[UInt8], start: Int, stop: Int) -> List[UInt8]:
     """Copy the half-open byte range [start, stop) of `b` into a new list.
 
     Args:
-        b: the source byte buffer.
-        start: inclusive start index.
-        stop: exclusive stop index.
+        b: The source byte buffer.
+        start: Inclusive start index.
+        stop: Exclusive stop index.
 
     Returns:
         A new list holding the bytes in [start, stop).
@@ -531,14 +531,14 @@ struct Reply(Movable):
         """Build a Reply from the generated ids and stop flag; stats default to zero.
 
         Args:
-            ids: generated token ids, with the EOS token dropped.
+            ids: Generated token ids, with the EOS token dropped.
             stopped: True if generation ended on EOS, False if it hit the cap.
-            n_prompt: number of prompt tokens.
-            reused: prompt tokens served from the KV cache.
-            prefilled: prompt tokens actually prefilled this request.
-            pf_ms: prefill wall-clock time, in milliseconds.
-            dec_ms: decode wall-clock time, in milliseconds.
-            tps: decode throughput, in tokens per second.
+            n_prompt: Number of prompt tokens.
+            reused: Prompt tokens served from the KV cache.
+            prefilled: Prompt tokens actually prefilled this request.
+            pf_ms: Prefill wall-clock time, in milliseconds.
+            dec_ms: Decode wall-clock time, in milliseconds.
+            tps: Decode throughput, in tokens per second.
         """
         self.ids = ids^
         self.stopped = stopped
@@ -625,12 +625,12 @@ def gen_full(
     is synced at the boundary — and logs a terse per-request line.
 
     Args:
-        s: the mutable server state (model, session, and caches).
-        ids: the full prompt token ids.
-        max_new: the maximum number of tokens to generate.
-        temp: sampling temperature (0 selects the greedy spec-decode path).
-        top_k: top-k sampling cutoff.
-        top_p: nucleus (top-p) sampling cutoff.
+        s: The mutable server state (model, session, and caches).
+        ids: The full prompt token ids.
+        max_new: The maximum number of tokens to generate.
+        temp: Sampling temperature (0 selects the greedy spec-decode path).
+        top_k: Top-k sampling cutoff.
+        top_p: Nucleus (top-p) sampling cutoff.
 
     Returns:
         A Reply holding the generated ids, stop flag, and per-request stats.
@@ -874,7 +874,7 @@ def service_unavailable(msg: String) -> Response:
     """503 with a JSON error body (flare has no built-in 503 helper).
 
     Args:
-        msg: the JSON error body.
+        msg: The JSON error body.
 
     Returns:
         A 503 Service Unavailable Response with a JSON content type.
@@ -904,8 +904,8 @@ def models_json(model: String, embed_model: String) -> String:
     (embed_model == "" means none).
 
     Args:
-        model: the chat model id.
-        embed_model: the embedding model id, or "" when none is loaded.
+        model: The chat model id.
+        embed_model: The embedding model id, or "" when none is loaded.
 
     Returns:
         The /v1/models list body as a JSON string.
@@ -920,7 +920,7 @@ def version_json(model: String) -> String:
     """Build the GET /v1/version body (engine name, version, served model).
 
     Args:
-        model: the served model id.
+        model: The served model id.
 
     Returns:
         The /v1/version body as a JSON string.
@@ -939,8 +939,8 @@ def embedding_item_json(index: Int, vec: List[Float32]) -> String:
     at full precision (~8 sig figs), enough to reconstruct the unit vector.
 
     Args:
-        index: the item's position in the embeddings list.
-        vec: the embedding vector.
+        index: The item's position in the embeddings list.
+        vec: The embedding vector.
 
     Returns:
         One OpenAI embedding object as a JSON string.
@@ -964,9 +964,9 @@ def embeddings_json(model: String, data: String, n_tok: Int) -> String:
     """OpenAI /v1/embeddings response envelope around the pre-built `data` array.
 
     Args:
-        model: the embedding model id.
-        data: the pre-built JSON array of embedding objects.
-        n_tok: the prompt/total token count for the usage field.
+        model: The embedding model id.
+        data: The pre-built JSON array of embedding objects.
+        n_tok: The prompt/total token count for the usage field.
 
     Returns:
         The /v1/embeddings response body as a JSON string.
@@ -990,7 +990,7 @@ def millfolio_stats(r: Reply) -> String:
     UI reads it. Mirrors the `gen:` line the server logs to stdout.
 
     Args:
-        r: the buffered Reply carrying the per-request stats.
+        r: The buffered Reply carrying the per-request stats.
 
     Returns:
         The `millfolio` stats object as a JSON string.
@@ -1034,13 +1034,13 @@ def completion_json(
     """Build a non-streaming OpenAI chat.completion body (content + usage, plus optional millfolio stats and reasoning).
 
     Args:
-        model: the served model id.
-        content: the assistant message content (pre-escaped).
-        n_prompt: the prompt token count.
-        n_gen: the generated token count.
-        finish: the finish_reason ("stop" / "length").
-        millfolio: the millfolio stats object, or "" to omit it.
-        reasoning: the pre-escaped reasoning content, or "" to omit it.
+        model: The served model id.
+        content: The assistant message content (pre-escaped).
+        n_prompt: The prompt token count.
+        n_gen: The generated token count.
+        finish: The finish_reason ("stop" / "length").
+        millfolio: The millfolio stats object, or "" to omit it.
+        reasoning: The pre-escaped reasoning content, or "" to omit it.
 
     Returns:
         The chat.completion body as a JSON string.
@@ -1075,8 +1075,8 @@ def chunk_reasoning_json(model: String, reasoning: String) -> String:
     (`reasoning` must already be JSON-escaped).
 
     Args:
-        model: the served model id.
-        reasoning: the pre-escaped reasoning content delta.
+        model: The served model id.
+        reasoning: The pre-escaped reasoning content delta.
 
     Returns:
         The chat.completion.chunk body as a JSON string.
@@ -1100,11 +1100,11 @@ def chunk_json(
     """Build a streaming chat.completion.chunk body carrying a content `delta` (or final finish_reason).
 
     Args:
-        model: the served model id.
-        delta: the content delta (used when `finish` is False).
+        model: The served model id.
+        delta: The content delta (used when `finish` is False).
         finish: True for the final chunk (emits finish_reason, empty delta).
-        fin: the finish_reason for the final chunk.
-        millfolio: the millfolio stats object, or "" to omit it.
+        fin: The finish_reason for the final chunk.
+        millfolio: The millfolio stats object, or "" to omit it.
 
     Returns:
         The chat.completion.chunk body as a JSON string.
@@ -1142,7 +1142,7 @@ def tool_calls_array_json(calls: List[ToolCall]) -> String:
     *string*, so it's escaped a second time on the way in.
 
     Args:
-        calls: the tool calls to serialize.
+        calls: The tool calls to serialize.
 
     Returns:
         The `message.tool_calls` array as a JSON string.
@@ -1174,12 +1174,12 @@ def completion_tools_json(
     """Build a non-streaming chat.completion body whose message carries `tool_calls` (finish_reason "tool_calls").
 
     Args:
-        model: the served model id.
-        content: the assistant message content (escaped here; "" → null).
-        calls: the lifted tool calls.
-        n_prompt: the prompt token count.
-        n_gen: the generated token count.
-        reasoning: the reasoning content (escaped here), or "" to omit it.
+        model: The served model id.
+        content: The assistant message content (escaped here; "" → null).
+        calls: The lifted tool calls.
+        n_prompt: The prompt token count.
+        n_gen: The generated token count.
+        reasoning: The reasoning content (escaped here), or "" to omit it.
 
     Returns:
         The chat.completion body as a JSON string.
@@ -1209,7 +1209,7 @@ def chunk_role_json(model: String) -> String:
     """Opening streaming chunk announcing the assistant role (content null).
 
     Args:
-        model: the served model id.
+        model: The served model id.
 
     Returns:
         The opening chat.completion.chunk body as a JSON string.
@@ -1228,9 +1228,9 @@ def chunk_toolcall_json(model: String, i: Int, call: ToolCall) -> String:
     valid since generation is already buffered.
 
     Args:
-        model: the served model id.
-        i: the tool call's index.
-        call: the tool call (name + arguments).
+        model: The served model id.
+        i: The tool call's index.
+        call: The tool call (name + arguments).
 
     Returns:
         The chat.completion.chunk body as a JSON string.
@@ -1261,10 +1261,10 @@ def function_call_item_json(
     """A Responses-API `function_call` output item.
 
     Args:
-        i: the call's index (drives the deterministic fc_/call_ ids).
-        name: the function name.
-        args: the function arguments (a JSON string).
-        status: the item status.
+        i: The call's index (drives the deterministic fc_/call_ ids).
+        name: The function name.
+        args: The function arguments (a JSON string).
+        status: The item status.
 
     Returns:
         The `function_call` output item as a JSON string.
@@ -1288,7 +1288,7 @@ def function_calls_output_json(calls: List[ToolCall]) -> String:
     """Build a Responses-API output array of `function_call` items, one per call.
 
     Args:
-        calls: the tool calls to serialize.
+        calls: The tool calls to serialize.
 
     Returns:
         The output array of `function_call` items as a JSON string.
@@ -1307,8 +1307,8 @@ def output_message_json(content: String, status: String) -> String:
     """Build a Responses-API assistant `message` output item wrapping `content` (pre-escaped output_text).
 
     Args:
-        content: the pre-escaped output_text content.
-        status: the item status.
+        content: The pre-escaped output_text content.
+        status: The item status.
 
     Returns:
         The assistant `message` output item as a JSON string.
@@ -1328,8 +1328,8 @@ def output_reasoning_json(reasoning: String, status: String) -> String:
     """A Responses-API `reasoning` output item (`reasoning` pre-escaped).
 
     Args:
-        reasoning: the pre-escaped reasoning summary text.
-        status: the item status.
+        reasoning: The pre-escaped reasoning summary text.
+        status: The item status.
 
     Returns:
         The `reasoning` output item as a JSON string.
@@ -1350,11 +1350,11 @@ def response_object_raw(
     of message and/or function_call items).
 
     Args:
-        model: the served model id.
-        output: the pre-built `output` array.
-        status: the response status.
-        n_prompt: the input (prompt) token count.
-        n_gen: the output (generated) token count.
+        model: The served model id.
+        output: The pre-built `output` array.
+        status: The response status.
+        n_prompt: The input (prompt) token count.
+        n_gen: The output (generated) token count.
 
     Returns:
         The `response` object as a JSON string.
@@ -1382,8 +1382,8 @@ def resp_event(type: String, payload: String) -> SseEvent:
     """Build a named Responses-API SSE frame: an `event:` line plus a JSON body whose `type` matches and is followed by `payload`.
 
     Args:
-        type: the event name (also the JSON body's `type`).
-        payload: the JSON fields following `type` in the body.
+        type: The event name (also the JSON body's `type`).
+        payload: The JSON fields following `type` in the body.
 
     Returns:
         The named SseEvent frame.
@@ -1404,8 +1404,8 @@ def stream_deltas(mut s: ServerState, ids: List[Int]) raises -> List[String]:
     (Buffered: all ids are already generated.)
 
     Args:
-        s: the mutable server state (used for its tokenizer).
-        ids: the generated token ids to decode.
+        s: The mutable server state (used for its tokenizer).
+        ids: The generated token ids to decode.
 
     Returns:
         A list of JSON-escaped content deltas, each ending on a UTF-8 boundary.
@@ -1441,7 +1441,7 @@ struct Api(Copyable, Handler, Movable):
         """Route a request by method and path to the matching endpoint, or 404.
 
         Args:
-            req: the incoming HTTP request.
+            req: The incoming HTTP request.
 
         Returns:
             The endpoint's Response, or a 404 when no route matches.
@@ -1482,7 +1482,7 @@ struct Api(Copyable, Handler, Movable):
         PPL = exp(-mean token_logprobs). No text is generated (echo-only).
 
         Args:
-            req: the /v1/completions HTTP request.
+            req: The /v1/completions HTTP request.
 
         Returns:
             A text_completion Response with `logprobs.token_logprobs`, or a
@@ -1577,7 +1577,7 @@ struct Api(Copyable, Handler, Movable):
         (last-token-pooled + L2-normalized vector).
 
         Args:
-            req: the /v1/embeddings HTTP request.
+            req: The /v1/embeddings HTTP request.
 
         Returns:
             An embeddings Response, a 400 on missing/invalid input, or a 503
@@ -1677,7 +1677,7 @@ struct Api(Copyable, Handler, Movable):
         """Handle POST /v1/chat/completions: render the chat template, generate, and frame the result (streaming or buffered, with tool-call lifting).
 
         Args:
-            req: the /v1/chat/completions HTTP request.
+            req: The /v1/chat/completions HTTP request.
 
         Returns:
             A chat.completion Response, or an SSE stream Response when
@@ -1839,7 +1839,7 @@ struct Api(Copyable, Handler, Movable):
         """Handle POST /v1/responses: map the Responses-API body onto the chat shape, generate, and frame it as Responses output items.
 
         Args:
-            req: the /v1/responses HTTP request.
+            req: The /v1/responses HTTP request.
 
         Returns:
             A Responses-API `response` Response, an SSE stream when `stream`
@@ -2122,7 +2122,7 @@ def read_text(path: String) raises -> String:
     """Read and return the entire contents of the file at `path` as a String.
 
     Args:
-        path: the file path to read.
+        path: The file path to read.
 
     Returns:
         The file's full contents as a String.
@@ -2197,7 +2197,7 @@ def hf_cache_path(model_id: String) raises -> String:
     not cached (no refs/main) — caller then treats the arg as a literal path.
 
     Args:
-        model_id: the Hugging Face repo id.
+        model_id: The Hugging Face repo id.
 
     Returns:
         The local snapshot directory of the cached model.
@@ -2241,10 +2241,10 @@ struct Config(Copyable, Movable):
 
         Args:
             port: TCP port to listen on.
-            model: the default chat model/checkpoint.
-            embed_model: the default embedding model/checkpoint.
-            q4: whether to use group-128 int4 projection weights.
-            kv_budget_mb: disk KV-cache LRU cap, in MiB.
+            model: The default chat model/checkpoint.
+            embed_model: The default embedding model/checkpoint.
+            q4: Whether to use group-128 int4 projection weights.
+            kv_budget_mb: Disk KV-cache LRU cap, in MiB.
         """
         self.port = port
         self.model = model^

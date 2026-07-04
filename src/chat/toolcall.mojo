@@ -40,8 +40,8 @@ struct ToolCall(Copyable, Movable):
         """Construct a `ToolCall` from a function name and JSON-string arguments.
 
         Args:
-            name: the function name.
-            arguments: the arguments serialized as a JSON string (OpenAI shape).
+            name: The function name.
+            arguments: The arguments serialized as a JSON string (OpenAI shape).
         """
         self.name = name^
         self.arguments = arguments^
@@ -67,9 +67,9 @@ struct ParsedReply(Movable):
         """Construct a `ParsedReply` from content, reasoning, and tool calls.
 
         Args:
-            content: the text outside any tool block (trimmed).
-            reasoning: the thinking-channel content (empty for Qwen / no channel).
-            calls: the tool calls in emission order.
+            content: The text outside any tool block (trimmed).
+            reasoning: The thinking-channel content (empty for Qwen / no channel).
+            calls: The tool calls in emission order.
         """
         self.content = content^
         self.reasoning = reasoning^
@@ -142,7 +142,7 @@ def repair_json(s: String) -> String:
     but not everything.
 
     Args:
-        s: the not-quite-JSON string to repair.
+        s: The not-quite-JSON string to repair.
 
     Returns:
         The repaired JSON string (best effort).
@@ -252,7 +252,7 @@ def parse_tool_calls(text: String) raises -> ParsedReply:
     with no closing tag (truncated generation) is repaired from what's there.
 
     Args:
-        text: the raw completion text to split.
+        text: The raw completion text to split.
 
     Returns:
         A `ParsedReply` with the surrounding content and parsed tool calls.
@@ -482,7 +482,7 @@ def parse_gemma_tool_calls(text: String) raises -> ParsedReply:
     from what's there.
 
     Args:
-        text: the raw Gemma completion text to split.
+        text: The raw Gemma completion text to split.
 
     Returns:
         A `ParsedReply` with the surrounding content and parsed tool calls.

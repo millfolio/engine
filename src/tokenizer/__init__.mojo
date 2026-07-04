@@ -31,7 +31,7 @@ def is_letter(b: Int) -> Bool:
     """True if byte `b` is an ASCII letter (A–Z or a–z).
 
     Args:
-        b: the byte value to test.
+        b: The byte value to test.
 
     Returns:
         True if `b` is an ASCII letter.
@@ -43,7 +43,7 @@ def is_digit(b: Int) -> Bool:
     """True if byte `b` is an ASCII digit (0–9).
 
     Args:
-        b: the byte value to test.
+        b: The byte value to test.
 
     Returns:
         True if `b` is an ASCII digit.
@@ -55,7 +55,7 @@ def is_space(b: Int) -> Bool:
     """True if byte `b` is ASCII whitespace (space, tab, LF, CR, VT, or FF).
 
     Args:
-        b: the byte value to test.
+        b: The byte value to test.
 
     Returns:
         True if `b` is an ASCII whitespace byte.
@@ -67,7 +67,7 @@ def is_nl(b: Int) -> Bool:
     """True if byte `b` is a newline character (LF or CR).
 
     Args:
-        b: the byte value to test.
+        b: The byte value to test.
 
     Returns:
         True if `b` is LF (10) or CR (13).
@@ -79,7 +79,7 @@ def lower(b: Int) -> Int:
     """ASCII-lowercase byte `b` (A–Z → a–z; other bytes unchanged).
 
     Args:
-        b: the byte value to lowercase.
+        b: The byte value to lowercase.
 
     Returns:
         The lowercased byte (unchanged if not an uppercase ASCII letter).
@@ -123,7 +123,7 @@ struct Tokenizer(Movable):
         """Apply rank-greedy BPE merges in place over the token ids `ids`.
 
         Args:
-            ids: the token ids to repeatedly merge in place (mutated).
+            ids: The token ids to repeatedly merge in place (mutated).
 
         Raises:
             If a merge-table dictionary lookup fails.
@@ -148,9 +148,9 @@ struct Tokenizer(Movable):
         """Return the end of the next GPT-2 pretokenization chunk starting at `pos`.
 
         Args:
-            buf: the input byte buffer.
-            pos: byte offset where the chunk starts.
-            end: byte offset one past the last byte available.
+            buf: The input byte buffer.
+            pos: Byte offset where the chunk starts.
+            end: Byte offset one past the last byte available.
 
         Returns:
             The byte offset one past the end of the next chunk.
@@ -239,10 +239,10 @@ struct Tokenizer(Movable):
         """Encode the `[start, stop)` span (GPT-2 path): pretokenize, map bytes to ids, BPE, append to `out`.
 
         Args:
-            buf: the input byte buffer.
-            start: byte offset to begin encoding at.
-            stop: byte offset one past the last byte to encode.
-            out: token-id list the results are appended to (mutated).
+            buf: The input byte buffer.
+            start: Byte offset to begin encoding at.
+            stop: Byte offset one past the last byte to encode.
+            out: Token-id list the results are appended to (mutated).
 
         Raises:
             If pretokenization or BPE merging fails.
@@ -271,10 +271,10 @@ struct Tokenizer(Movable):
         UTF-8 byte of the original codepoint. Then rank-greedy BPE over the gap.
 
         Args:
-            buf: the input byte buffer.
-            start: byte offset where the gap begins.
-            stop: byte offset one past the end of the gap.
-            out: token-id list the results are appended to (mutated).
+            buf: The input byte buffer.
+            start: Byte offset where the gap begins.
+            stop: Byte offset one past the end of the gap.
+            out: Token-id list the results are appended to (mutated).
 
         Raises:
             If a vocab lookup or BPE merging fails.
@@ -326,8 +326,8 @@ struct Tokenizer(Movable):
         """Return the longest special token matching at `pos` (id -1, length 0 if none).
 
         Args:
-            buf: the input byte buffer.
-            pos: byte offset to test for a special-token match.
+            buf: The input byte buffer.
+            pos: Byte offset to test for a special-token match.
 
         Returns:
             An `SpMatch` with the matched token id and byte length (id -1,
@@ -356,7 +356,7 @@ struct Tokenizer(Movable):
         """Encode raw input bytes to a list of token ids (special tokens split out first).
 
         Args:
-            buf: the raw input bytes to encode.
+            buf: The raw input bytes to encode.
 
         Returns:
             The encoded token ids.
@@ -390,7 +390,7 @@ struct Tokenizer(Movable):
         """Decode token ids back to raw bytes (vocab tokens, then special tokens).
 
         Args:
-            ids: the token ids to decode.
+            ids: The token ids to decode.
 
         Returns:
             The decoded raw bytes.
@@ -417,7 +417,7 @@ def hex_val(c: Int) -> Int:
     """Value (0–15) of a hex-digit character code `c` (0–9 or lowercase a–f).
 
     Args:
-        c: the character code of a hex digit.
+        c: The character code of a hex digit.
 
     Returns:
         The integer value 0–15 of the hex digit.
@@ -431,7 +431,7 @@ def hex_to_bytes(s: String) -> List[UInt8]:
     """Parse a lowercase hex string into the bytes it encodes.
 
     Args:
-        s: the lowercase hex string.
+        s: The lowercase hex string.
 
     Returns:
         The bytes the hex string encodes.
@@ -492,7 +492,7 @@ def load_tokenizer_json(path: String) raises -> Tokenizer:
     special-token table. Produces the same tables as `load_tokenizer`.
 
     Args:
-        path: filesystem path to the HuggingFace `tokenizer.json`.
+        path: Filesystem path to the HuggingFace `tokenizer.json`.
 
     Returns:
         The constructed `Tokenizer`.
@@ -633,7 +633,7 @@ def load_gemma_tokenizer_json(path: String) raises -> Tokenizer:
       - `added_tokens` -> `sp_text`/`sp_id` (matched before normalization).
 
     Args:
-        path: filesystem path to Gemma's HuggingFace `tokenizer.json`.
+        path: Filesystem path to Gemma's HuggingFace `tokenizer.json`.
 
     Returns:
         The constructed Gemma `Tokenizer`.
@@ -728,7 +728,7 @@ def load_tokenizer(dir: String) raises -> Tokenizer:
     """Build a `Tokenizer` from tok-capture's resolved `.tsv` dumps (vocab/merges/specials) in `dir`.
 
     Args:
-        dir: directory containing `vocab.tsv`, `merges.tsv`, and `specials.tsv`.
+        dir: Directory containing `vocab.tsv`, `merges.tsv`, and `specials.tsv`.
 
     Returns:
         The constructed `Tokenizer`.

@@ -211,9 +211,9 @@ struct GemmaE2bWeights(ModelWeights, Movable):
         (PLE) input signal for this forward pass; returns the scaled hidden.
 
         Args:
-            ctx: the device (GPU) context.
-            ids: the `T` input token ids on device.
-            T: number of tokens in the prompt.
+            ctx: The device (GPU) context.
+            ids: The `T` input token ids on device.
+            T: Number of tokens in the prompt.
 
         Returns:
             The scaled hidden states for the prompt.
@@ -266,15 +266,15 @@ struct GemmaE2bWeights(ModelWeights, Movable):
         """Run decoder layer `l` over hidden `h`, updating the KV caches.
 
         Args:
-            ctx: the device (GPU) context.
-            l: index of the decoder layer to run.
-            h: the hidden states (mutated/consumed).
-            kcs: per-layer key caches.
-            vcs: per-layer value caches.
-            Tq: number of query positions in this pass.
-            q_offset: absolute position of the first query token.
-            cache_len: current length of the KV cache.
-            dummy: scratch buffer reused across GEMM calls.
+            ctx: The device (GPU) context.
+            l: Index of the decoder layer to run.
+            h: The hidden states (mutated/consumed).
+            kcs: Per-layer key caches.
+            vcs: Per-layer value caches.
+            Tq: Number of query positions in this pass.
+            q_offset: Absolute position of the first query token.
+            cache_len: Current length of the KV cache.
+            dummy: Scratch buffer reused across GEMM calls.
 
         Returns:
             The updated hidden states after the layer.
@@ -292,10 +292,10 @@ struct GemmaE2bWeights(ModelWeights, Movable):
         """Compute soft-capped LM-head logits for the LAST position only.
 
         Args:
-            ctx: the device (GPU) context.
-            h: the final hidden states.
-            T: number of positions in `h`.
-            dummy: scratch buffer reused across GEMM calls.
+            ctx: The device (GPU) context.
+            h: The final hidden states.
+            T: Number of positions in `h`.
+            dummy: Scratch buffer reused across GEMM calls.
 
         Returns:
             The soft-capped logits over the vocabulary for the last position.
@@ -330,10 +330,10 @@ struct GemmaE2bWeights(ModelWeights, Movable):
         """Compute soft-capped LM-head logits for ALL `T` positions (flattened).
 
         Args:
-            ctx: the device (GPU) context.
-            h: the final hidden states.
-            T: number of positions in `h`.
-            dummy: scratch buffer reused across GEMM calls.
+            ctx: The device (GPU) context.
+            h: The final hidden states.
+            T: Number of positions in `h`.
+            dummy: Scratch buffer reused across GEMM calls.
 
         Returns:
             The soft-capped logits for all `T` positions, flattened.
@@ -373,11 +373,11 @@ struct GemmaE2bWeights(ModelWeights, Movable):
         """Return per-position log-probabilities of the given target tokens.
 
         Args:
-            ctx: the device (GPU) context.
-            h: the final hidden states.
-            n: number of positions to score.
-            targets: the target token id at each position.
-            dummy: scratch buffer reused across GEMM calls.
+            ctx: The device (GPU) context.
+            h: The final hidden states.
+            n: Number of positions to score.
+            targets: The target token id at each position.
+            dummy: Scratch buffer reused across GEMM calls.
 
         Returns:
             The log-probability of each target token, per position.
@@ -427,9 +427,9 @@ def load_e2b_weights(
     is ~5 GB bf16, ~1.4 GB int4, so it co-resides with the 12B target).
 
     Args:
-        ctx: the device (GPU) context.
-        path: directory holding the e2b checkpoint safetensors.
-        q4: quantize projections to int4 when True (the default).
+        ctx: The device (GPU) context.
+        path: Directory holding the e2b checkpoint safetensors.
+        q4: Quantize projections to int4 when True (the default).
 
     Returns:
         The loaded `GemmaE2bWeights`.
@@ -736,17 +736,17 @@ def e2b_attn(
     e2b geometry; writes K/V into the caches only when `write` is True.
 
     Args:
-        ctx: the device (GPU) context.
-        qkv: the fused [q|k|v] projection output for this layer.
-        kc: the key cache to attend against (and write into when `write`).
-        vc: the value cache to attend against (and write into when `write`).
+        ctx: The device (GPU) context.
+        qkv: The fused [q|k|v] projection output for this layer.
+        kc: The key cache to attend against (and write into when `write`).
+        vc: The value cache to attend against (and write into when `write`).
         write: True to compute and store K/V into `kc`/`vc` (own-KV layer).
-        qnw: the query-norm weight.
-        knw: the key-norm weight.
+        qnw: The query-norm weight.
+        knw: The key-norm weight.
         l_full: True for a full-attention layer, False for sliding.
-        Tq: number of query positions in this pass.
-        q_offset: absolute position of the first query token.
-        cache_len: current length of the KV cache.
+        Tq: Number of query positions in this pass.
+        q_offset: Absolute position of the first query token.
+        cache_len: Current length of the KV cache.
 
     Returns:
         The attention output for this block.
@@ -920,16 +920,16 @@ def e2b_layer(
     followed by Per-Layer-Embedding integration and the layer_scalar.
 
     Args:
-        ctx: the device (GPU) context.
-        w: the e2b model weights.
-        l: index of the decoder layer to run.
-        h: the input hidden states.
-        kcs: per-layer key caches.
-        vcs: per-layer value caches.
-        Tq: number of query positions in this pass.
-        q_offset: absolute position of the first query token.
-        cache_len: current length of the KV cache.
-        dummy: scratch buffer reused across GEMM calls.
+        ctx: The device (GPU) context.
+        w: The e2b model weights.
+        l: Index of the decoder layer to run.
+        h: The input hidden states.
+        kcs: Per-layer key caches.
+        vcs: Per-layer value caches.
+        Tq: Number of query positions in this pass.
+        q_offset: Absolute position of the first query token.
+        cache_len: Current length of the KV cache.
+        dummy: Scratch buffer reused across GEMM calls.
 
     Returns:
         The hidden states after the layer.
