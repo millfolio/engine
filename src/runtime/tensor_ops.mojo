@@ -9,6 +9,7 @@ from std.math import ceildiv
 from std.gpu import WARP_SIZE
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
+from runtime.kernel_cache import cached_enqueue
 
 from kernels import (
     matmul_kernel,
@@ -163,7 +164,8 @@ def mm(
         # simdgroup-matrix path is for prefill only — at M=1 its 8-row tiles waste
         # 7/8 of every fragment, so decode always uses the GEMV.
         comptime k = matmul_kernel[type_of(lay)]
-        ctx.enqueue_function[k](
+        cached_enqueue[k](
+            ctx,
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
@@ -180,7 +182,8 @@ def mm(
         # on the M4). Gated by the startup probe; the scalar path below is the
         # fallback if this toolchain rejects the AIR intrinsics.
         comptime ks = matmul_simd_kernel[type_of(lay)]
-        ctx.enqueue_function[ks](
+        cached_enqueue[ks](
+            ctx,
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
@@ -200,7 +203,8 @@ def mm(
         comptime TM = 8
         comptime CN = 8
         comptime kt = matmul_tiled_kernel[type_of(lay), TM, CN]
-        ctx.enqueue_function[kt](
+        cached_enqueue[kt](
+            ctx,
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
@@ -261,7 +265,8 @@ def mm_w(
     var yt = TileTensor(y, lay)
     if M == 1:
         comptime k = matmul_q4_kernel[type_of(lay)]
-        ctx.enqueue_function[k](
+        cached_enqueue[k](
+            ctx,
             xt,
             pt,
             st,
@@ -281,7 +286,8 @@ def mm_w(
         # its wasted 56-row padding at small M. Flat ~M-independent here and well
         # below both the batched GEMV (linear, loses past Q≈5) and the 64-row GEMM.
         comptime ks = matmul_q4_small_kernel[type_of(lay)]
-        ctx.enqueue_function[ks](
+        cached_enqueue[ks](
+            ctx,
             xt,
             pt,
             st,
@@ -299,7 +305,8 @@ def mm_w(
         # Tiny M (2..4) — or no simdgroup intrinsic: batched GEMV (weights read once,
         # M rows accumulated in registers); cheapest at the smallest batch sizes.
         comptime kb = matmul_q4_batch_kernel[type_of(lay)]
-        ctx.enqueue_function[kb](
+        cached_enqueue[kb](
+            ctx,
             xt,
             pt,
             st,
@@ -315,7 +322,8 @@ def mm_w(
         )
     elif simd_ok:
         comptime ks = matmul_simd_q4_kernel[type_of(lay)]
-        ctx.enqueue_function[ks](
+        cached_enqueue[ks](
+            ctx,
             xt,
             pt,
             st,
@@ -333,7 +341,8 @@ def mm_w(
         comptime TM = 8
         comptime CN = 8
         comptime kt = matmul_tiled_q4_kernel[type_of(lay), TM, CN]
-        ctx.enqueue_function[kt](
+        cached_enqueue[kt](
+            ctx,
             xt,
             pt,
             st,
@@ -395,7 +404,8 @@ def mm_w_add(
     if w.q4:
         var NG = K // Q4_GROUP
         comptime kq = matmul_q4_resid_kernel[type_of(lay)]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(x, row_major(M * K)),
             TileTensor(w.packed, row_major(N * K // 8)),
             TileTensor(w.scales, row_major(N * NG)),
@@ -412,7 +422,8 @@ def mm_w_add(
         )
     else:
         comptime kb = matmul_resid_kernel[type_of(lay)]
-        ctx.enqueue_function[kb](
+        cached_enqueue[kb](
+            ctx,
             TileTensor(x, row_major(M * K)),
             TileTensor(w.bf16, row_major(N * K)),
             bt,
@@ -468,7 +479,8 @@ def mm_norm(
     var y = ctx.enqueue_create_buffer[DType.float32](M * N)
     var lay = row_major(M * N)
     comptime k = matmul_norm_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(x, row_major(M * K)),
         TileTensor(lnw, row_major(K)),
         TileTensor(w, row_major(N * K)),
@@ -526,7 +538,8 @@ def mm_w_norm(
     var lay = row_major(M * N)
     var NG = K // Q4_GROUP
     comptime k = matmul_q4_norm_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(x, row_major(M * K)),
         TileTensor(lnw, row_major(K)),
         TileTensor(w.packed, row_major(N * K // 8)),
@@ -584,7 +597,8 @@ def mm_w_silu_add(
     if w.q4:
         var NG = inter // Q4_GROUP
         comptime kq = matmul_q4_silu_resid_kernel[type_of(lay)]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(gu, row_major(M * 2 * inter)),
             TileTensor(w.packed, row_major(N * inter // 8)),
             TileTensor(w.scales, row_major(N * NG)),
@@ -599,7 +613,8 @@ def mm_w_silu_add(
         )
     else:
         comptime kb = matmul_silu_resid_kernel[type_of(lay)]
-        ctx.enqueue_function[kb](
+        cached_enqueue[kb](
+            ctx,
             TileTensor(gu, row_major(M * 2 * inter)),
             TileTensor(w.bf16, row_major(N * inter)),
             TileTensor(resid, lay),
@@ -659,7 +674,8 @@ def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
         var bt = TileTensor(bb, row_major(1))
         var yt = TileTensor(yb, lay)
         comptime ks = matmul_simd_kernel[type_of(lay)]
-        ctx.enqueue_function[ks](
+        cached_enqueue[ks](
+            ctx,
             xt,
             wt,
             bt,
@@ -711,7 +727,8 @@ def rmsnorm(
     var y = ctx.enqueue_create_buffer[DType.float32](T * dim)
     var lay = row_major(T * dim)
     comptime k = rmsnorm_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
         TileTensor(y, lay),
@@ -753,7 +770,8 @@ def rmsnorm_add(
     var y = ctx.enqueue_create_buffer[DType.float32](T * dim)
     var lay = row_major(T * dim)
     comptime k = rmsnorm_add_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
         TileTensor(resid, lay),
@@ -796,7 +814,8 @@ def gelu_mul_strided(
     var y = ctx.enqueue_create_buffer[DType.float32](T * n)
     var lay = row_major(T * n)
     comptime k = gelu_mul_strided_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(a, lay),
         TileTensor(p, row_major(T * stride)),
         TileTensor(y, lay),
@@ -830,7 +849,8 @@ def add(
     var y = ctx.enqueue_create_buffer[DType.float32](n)
     var lay = row_major(n)
     comptime k = add_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
         TileTensor(y, lay),
@@ -861,7 +881,8 @@ def silu_mul(
     var y = ctx.enqueue_create_buffer[DType.float32](n)
     var lay = row_major(n)
     comptime k = silu_mul_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
         TileTensor(y, lay),
@@ -892,7 +913,8 @@ def silu_mul_cat(
     var y = ctx.enqueue_create_buffer[DType.float32](T * inter)
     var lay = row_major(T * inter)
     comptime k = silu_mul_cat_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
         TileTensor(y, lay),
         T,
@@ -923,7 +945,8 @@ def gelu_mul_cat(
     var y = ctx.enqueue_create_buffer[DType.float32](T * inter)
     var lay = row_major(T * inter)
     comptime k = gelu_mul_cat_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
         TileTensor(y, lay),
         T,
@@ -954,7 +977,8 @@ def gelu_mul(
     var y = ctx.enqueue_create_buffer[DType.float32](n)
     var lay = row_major(n)
     comptime k = gelu_mul_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
         TileTensor(y, lay),
@@ -996,7 +1020,8 @@ def nll_gather(
     var out = ctx.enqueue_create_buffer[DType.float32](n)
     var nlay = row_major(n)
     comptime k = nll_gather_kernel[type_of(nlay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(logits, row_major(n * vocab)),
         TileTensor(tgt, nlay),
         TileTensor(out, nlay),
@@ -1028,8 +1053,13 @@ def softcap(ctx: DeviceContext, mut x: DevBuf, n: Int, cap: Float32) raises:
     """
     var lay = row_major(n)
     comptime k = softcap_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
-        TileTensor(x, lay), n, cap, grid_dim=ceildiv(n, BLOCK), block_dim=BLOCK
+    cached_enqueue[k](
+        ctx,
+        TileTensor(x, lay),
+        n,
+        cap,
+        grid_dim=ceildiv(n, BLOCK),
+        block_dim=BLOCK,
     )
 
 
@@ -1047,8 +1077,13 @@ def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
     """
     var lay = row_major(n)
     comptime k = add_scalar_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
-        TileTensor(x, lay), n, c, grid_dim=ceildiv(n, BLOCK), block_dim=BLOCK
+    cached_enqueue[k](
+        ctx,
+        TileTensor(x, lay),
+        n,
+        c,
+        grid_dim=ceildiv(n, BLOCK),
+        block_dim=BLOCK,
     )
 
 
@@ -1072,7 +1107,8 @@ def mul_scalar(
     var y = ctx.enqueue_create_buffer[DType.float32](n)
     var lay = row_major(n)
     comptime k = mul_scalar_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(x, lay),
         TileTensor(y, lay),
         n,
@@ -1113,7 +1149,8 @@ def embed_tokens(
     comptime k = embed_kernel[
         type_of(lay)
     ]  # dimension-agnostic (runtime T, hidden)
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(ids, row_major(T)),
         TileTensor(emb, row_major(vocab * hidden)),
         TileTensor(h, lay),
@@ -1145,7 +1182,8 @@ def last_row(
     var y = ctx.enqueue_create_buffer[DType.float32](dim)
     var lay = row_major(dim)
     comptime k = slice_row_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(src, row_major(T * dim)),
         TileTensor(y, lay),
         (T - 1) * dim,
@@ -1180,7 +1218,8 @@ def copy_into(
     """
     var lay = row_major(n)
     comptime k = copy_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(src, lay),
         TileTensor(dst, row_major(dst_len)),
         dst_offset,
@@ -1220,7 +1259,8 @@ def copy_strided(
     """
     var lay = row_major(T * in_stride)
     comptime k = copy_strided_kernel[type_of(lay)]
-    ctx.enqueue_function[k](
+    cached_enqueue[k](
+        ctx,
         TileTensor(src, lay),
         TileTensor(dst, row_major(dst_len)),
         T,

@@ -26,6 +26,7 @@ from std.math import ceildiv, sqrt
 from std.gpu import WARP_SIZE
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
+from runtime.kernel_cache import cached_enqueue
 
 from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
@@ -774,7 +775,8 @@ def e2b_attn(
     var qnlay = row_major(head_dim)
     if l_full:
         comptime kq = rope_q_kernel[type_of(qrlay), E_HQ, EFU_HEAD_DIM, True]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
@@ -789,7 +791,8 @@ def e2b_attn(
         )
     else:
         comptime kq = rope_q_kernel[type_of(qrlay), E_HQ, ESL_HEAD_DIM, True]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
@@ -811,7 +814,8 @@ def e2b_attn(
             comptime kk = rope_k_kernel[
                 type_of(qslay), EFU_HKV, EFU_HEAD_DIM, True
             ]
-            ctx.enqueue_function[kk](
+            cached_enqueue[kk](
+                ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
                 TileTensor(knw, knlay),
@@ -828,7 +832,8 @@ def e2b_attn(
             comptime kk = rope_k_kernel[
                 type_of(qslay), ESL_HKV, ESL_HEAD_DIM, True
             ]
-            ctx.enqueue_function[kk](
+            cached_enqueue[kk](
+                ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
                 TileTensor(knw, knlay),
@@ -844,7 +849,8 @@ def e2b_attn(
         # V: scale-free v_norm → own cache rows (mirror 12B: Gemma-4 norms V).
         if l_full:
             comptime kv = vnorm_kernel[type_of(qslay), EFU_HKV, EFU_HEAD_DIM]
-            ctx.enqueue_function[kv](
+            cached_enqueue[kv](
+                ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(vc, clay),
                 Tq,
@@ -856,7 +862,8 @@ def e2b_attn(
             )
         else:
             comptime kv = vnorm_kernel[type_of(qslay), ESL_HKV, ESL_HEAD_DIM]
-            ctx.enqueue_function[kv](
+            cached_enqueue[kv](
+                ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(vc, clay),
                 Tq,
@@ -872,7 +879,8 @@ def e2b_attn(
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
         comptime ka = tc_attn_kernel[type_of(olay), E_HQ, EFU_HKV, EFU_HEAD_DIM]
-        ctx.enqueue_function[ka](
+        cached_enqueue[ka](
+            ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
@@ -886,7 +894,8 @@ def e2b_attn(
         )
     else:
         comptime ka = tc_attn_kernel[type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM]
-        ctx.enqueue_function[ka](
+        cached_enqueue[ka](
+            ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),

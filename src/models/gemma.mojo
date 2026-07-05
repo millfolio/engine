@@ -29,6 +29,7 @@ from std.math import ceildiv
 from std.gpu import WARP_SIZE
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
+from runtime.kernel_cache import cached_enqueue
 
 from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
@@ -690,7 +691,8 @@ def gemma_attn(
     var qnlay = row_major(head_dim)
     if l_full:
         comptime kq = rope_q_kernel[type_of(qrlay), G_HQ, FU_HEAD_DIM, True]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
@@ -705,7 +707,8 @@ def gemma_attn(
         )
     else:
         comptime kq = rope_q_kernel[type_of(qrlay), G_HQ, SL_HEAD_DIM, True]
-        ctx.enqueue_function[kq](
+        cached_enqueue[kq](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
@@ -724,7 +727,8 @@ def gemma_attn(
     var knlay = row_major(head_dim)
     if l_full:
         comptime kk = rope_k_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, True]
-        ctx.enqueue_function[kk](
+        cached_enqueue[kk](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
             TileTensor(knw, knlay),
@@ -739,7 +743,8 @@ def gemma_attn(
         )
     else:
         comptime kk = rope_k_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, True]
-        ctx.enqueue_function[kk](
+        cached_enqueue[kk](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
             TileTensor(knw, knlay),
@@ -758,7 +763,8 @@ def gemma_attn(
     var vsrc_off = k_off if l_full else v_off
     if l_full:
         comptime kv = vnorm_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM]
-        ctx.enqueue_function[kv](
+        cached_enqueue[kv](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(vc, clay),
             Tq,
@@ -770,7 +776,8 @@ def gemma_attn(
         )
     else:
         comptime kv = vnorm_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM]
-        ctx.enqueue_function[kv](
+        cached_enqueue[kv](
+            ctx,
             TileTensor(qkv, qslay),
             TileTensor(vc, clay),
             Tq,
@@ -787,7 +794,8 @@ def gemma_attn(
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
         comptime ka = tc_attn_kernel[type_of(olay), G_HQ, FU_HKV, FU_HEAD_DIM]
-        ctx.enqueue_function[ka](
+        cached_enqueue[ka](
+            ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
@@ -801,7 +809,8 @@ def gemma_attn(
         )
     else:
         comptime ka = tc_attn_kernel[type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM]
-        ctx.enqueue_function[ka](
+        cached_enqueue[ka](
+            ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
