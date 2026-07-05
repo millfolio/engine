@@ -586,6 +586,38 @@ def _verify(mut s: ServerState, batch: List[Int]) raises -> List[Float32]:
     return sess_verify(s.ctx, s.model[Weights], s.sess, batch)
 
 
+def _warmup(mut s: ServerState) raises:
+    """Force the Metal shader compiler to build every GPU pipeline the generative
+    hot path uses NOW (at load), so it never runs on a user query.
+
+    Each op launcher compiles its kernel the first time that kernel is dispatched;
+    the compiled `MTLComputePipelineState` is then cached by kernel identity and
+    reused for all later dispatches (the layouts are shape-agnostic — dims are
+    passed as runtime args, so a warmup dispatch at M=2/3 compiles the exact same
+    monomorphization a real M=500 prefill later reuses). The one-time cost is real
+    and cold-cache-sensitive: on a fresh Metal shader cache the first query would
+    otherwise peg the GPU on `newComputePipelineState…`/`MTLCompiler` for seconds,
+    starving everything else. Dispatching a throwaway forward here moves that
+    compile behind the "loading model…" banner instead.
+
+    This drives all three shape families so no path compiles lazily under load:
+      * prefill  (M>1  — simdgroup-matrix / tiled GEMM + norms + attn + lm_logits)
+      * decode   (M==1 — fused-norm GEMV path + RoPE + tensor-core attention)
+      * verify   (M>1  batch — the speculative-decode forward)
+    Every decoder layer runs, so per-layer variants (full vs sliding attention,
+    own-KV vs KV-shared) are all touched. Output is discarded and the KV session
+    is reset to empty — no effect on numerics or on the first real request.
+    """
+    var pair = [1, 1]  # two arbitrary in-vocab token ids (BOS-ish)
+    _ = _prefill_suffix(s, pair, 0)  # prefill kernels (M=2)
+    _ = _step(s, 1)  # decode kernels (M=1)
+    _ = _step(s, 1)
+    _ = _verify(s, [1, 1, 1])  # spec-verify batch kernels (M=3)
+    # Discard the warmup context: next real prefill writes from position 0.
+    s.sess.pos = 0
+    s.cached = List[Int]()
+
+
 def _is_stop(s: ServerState, tok: Int) -> Bool:
     """The server's stop set: the model's EOS pair + its optional extra stop token
     (e.g. Gemma's <|tool_response>), all carried by ModelConfig."""
@@ -2673,6 +2705,11 @@ def main() raises:
     )
     var sp = alloc[ServerState](1)
     sp.init_pointee_move(state^)
+    # Pre-compile every generative GPU pipeline off the serving path (skip the
+    # embed-only primary, which has no generative forward). See `_warmup`.
+    if not primary_is_embed:
+        print("  warming up GPU kernels…")
+        _warmup(sp[])
     var api = Api(sp)
 
     print(
