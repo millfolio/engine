@@ -66,6 +66,7 @@ from model import (
     BlockCache,
 )
 from models.gemma_e2b import GemmaE2bWeights, load_e2b_weights
+from models.gemma_e4b import GemmaE4bWeights, load_e4b_weights
 from tokenizer import (
     Tokenizer,
     load_tokenizer,
@@ -115,6 +116,7 @@ comptime MODEL_3B = "Qwen/Qwen2.5-3B-Instruct"
 """Default served id for the Qwen2.5 3B chat model."""
 comptime MODEL_GEMMA = "google/gemma-4-12b-it"
 comptime MODEL_GEMMA_E2B = "google/gemma-4-e2b-it"
+comptime MODEL_GEMMA_E4B = "google/gemma-4-e4b-it"
 """Default served id for the Gemma 4 12B chat model."""
 # Default SECONDARY embedding model (arch==2). Resolved from the HF cache when no
 # $EMBED_SAFETENSORS / config `embed_model` is given; if it isn't cached either,
@@ -197,7 +199,7 @@ struct ServerState(Movable):
     # weight-touching op dispatches once on `model.isa[…]()`; the rest of the server
     # is family-agnostic and reads per-model behavior (eos, tool style, extra stop)
     # from `cfg`. Adding a model = a Variant arm + a ModelConfig — no scattered ifs.
-    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights]
+    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights]
     """The primary (chat) model weights, dispatched on via `model.isa[…]()`.
     GemmaE2bWeights is the effective-2B (PLE) Gemma-4 — a small model that fits
     ~16 GB; GemmaWeights is the dense 12B; Weights is Qwen."""
@@ -231,7 +233,7 @@ struct ServerState(Movable):
     def __init__(
         out self,
         var ctx: DeviceContext,
-        var model: Variant[Weights, GemmaWeights, GemmaE2bWeights],
+        var model: Variant[Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights],
         cfg: ModelConfig,
         primary_arch: Int,
         max_seq: Int,
@@ -563,6 +565,10 @@ def _prefill_suffix(
         return sess_prefill_suffix(
             s.ctx, s.model[GemmaE2bWeights], s.sess, suffix, reuse, True
         )
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_prefill_suffix(
+            s.ctx, s.model[GemmaE4bWeights], s.sess, suffix, reuse, True
+        )
     return sess_prefill_suffix(
         s.ctx, s.model[Weights], s.sess, suffix, reuse, True
     )
@@ -573,6 +579,8 @@ def _step(mut s: ServerState, token: Int) raises -> List[Float32]:
         return sess_step(s.ctx, s.model[GemmaWeights], s.sess, token)
     if s.model.isa[GemmaE2bWeights]():
         return sess_step(s.ctx, s.model[GemmaE2bWeights], s.sess, token)
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_step(s.ctx, s.model[GemmaE4bWeights], s.sess, token)
     return sess_step(s.ctx, s.model[Weights], s.sess, token)
 
 
@@ -583,6 +591,8 @@ def _verify(mut s: ServerState, batch: List[Int]) raises -> List[Float32]:
         return sess_verify(s.ctx, s.model[GemmaWeights], s.sess, batch)
     if s.model.isa[GemmaE2bWeights]():
         return sess_verify(s.ctx, s.model[GemmaE2bWeights], s.sess, batch)
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_verify(s.ctx, s.model[GemmaE4bWeights], s.sess, batch)
     return sess_verify(s.ctx, s.model[Weights], s.sess, batch)
 
 
@@ -636,6 +646,10 @@ def _token_logprobs(
     if s.model.isa[GemmaE2bWeights]():
         return sess_token_logprobs(
             s.ctx, s.model[GemmaE2bWeights], s.sess, tokens
+        )
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_token_logprobs(
+            s.ctx, s.model[GemmaE4bWeights], s.sess, tokens
         )
     return sess_token_logprobs(s.ctx, s.model[Weights], s.sess, tokens)
 
@@ -2191,6 +2205,18 @@ def _is_e2b_ckpt(ckpt_dir: String) raises -> Bool:
     return False
 
 
+def _is_e4b_ckpt(ckpt_dir: String) raises -> Bool:
+    """Distinguish the effective-4B (PLE) Gemma-4 from the dense 12B: e4b has
+    hidden_size 2560 (dense is 3840) and its checkpoints are named `*e4b*`. Only
+    consulted for FAMILY_GEMMA checkpoints."""
+    if ckpt_dir.find("e4b") != -1 or ckpt_dir.find("E4B") != -1:
+        return True
+    var cfg = ckpt_dir + "/config.json"
+    if exists(cfg) and read_text(cfg).find('"hidden_size": 2560') != -1:
+        return True
+    return False
+
+
 def _dirname(path: String) -> String:
     """Directory component of `path` (everything before the last '/'), or '.'.
     """
@@ -2449,7 +2475,7 @@ def main() raises:
     var p_simd_ok: Bool
     var p_maxseq: Int
     var p_cfg: ModelConfig
-    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights]
+    var model: Variant[Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights]
     var gemm_path = String("simdgroup-matrix (~4.5x)")
     if family == FAMILY_GEMMA and _is_e2b_ckpt(ckpt_dir):
         # Gemma-4 effective-2B (PLE + KV-sharing). int4 by default (~1.4 GB) — a
@@ -2480,6 +2506,35 @@ def main() raises:
             sep="",
         )
         model = ew^
+    elif family == FAMILY_GEMMA and _is_e4b_ckpt(ckpt_dir):
+        # Gemma-4 effective-4B (PLE + real KV-sharing: layers ≥ 24 ship no k/v).
+        # int4 projections by default; bf16 embed + PLE tables dominate memory.
+        var fw = load_e4b_weights(ctx, ckpt_dir)  # q4=True default
+        fw.simd_ok = probe_simd_gemm(ctx)
+        p_cfg = fw.config()
+        p_nlayers = p_cfg.nlayers
+        p_nkv = p_cfg.nkv
+        p_arch = -1
+        p_quant = True
+        p_simd_ok = fw.simd_ok
+        p_maxseq = GEMMA_MAX_SEQ
+        if not fw.simd_ok:
+            gemm_path = String("scalar tiled (simd probe failed)")
+        if model_id.byte_length() == 0:
+            model_id = String(MODEL_GEMMA_E4B) + "-int4"
+        print(
+            "  serving ",
+            model_id,
+            "  (e4b: hidden=",
+            fw.hidden,
+            ", layers=",
+            p_nlayers,
+            ", PLE + KV-share, max_seq=",
+            p_maxseq,
+            ")",
+            sep="",
+        )
+        model = fw^
     elif family == FAMILY_GEMMA:
         # The 12B bf16 model is ~24 GB and won't fit a 24 GB GPU, so int4 is forced.
         var alllayers = List[Int]()
