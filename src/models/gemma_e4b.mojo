@@ -314,7 +314,7 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, self.vocab, E_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32]()
+        var out = List[Float32](capacity=self.vocab)
         with logits.map_to_host() as m:
             var mt = TileTensor(m, row_major(self.vocab))
             for i in range(self.vocab):
@@ -352,7 +352,7 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, n, E_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32]()
+        var out = List[Float32](capacity=n)
         with logits.map_to_host() as m:
             var mt = TileTensor(m, row_major(n))
             for i in range(n):
@@ -411,10 +411,10 @@ def _load_scalar(
 ) raises -> Float32:
     var b = load_named(ctx, paths, entries, name2idx, name)
     ctx.synchronize()
-    var out = List[Float32]()
+    var v: Float32
     with b.map_to_host() as m:
-        out.append(m[0])
-    return out[0]
+        v = m[0]
+    return v
 
 
 def load_e4b_weights(
@@ -464,27 +464,28 @@ def load_e4b_weights(
         ctx, paths, entries, name2idx, pfx + "per_layer_projection_norm.weight"
     )
 
-    var ln1 = List[DevBuf]()
-    var ln_post_attn = List[DevBuf]()
-    var ln_pre_ff = List[DevBuf]()
-    var ln_post_ff = List[DevBuf]()
-    var qkv = List[QMat]()
-    var ow = List[QMat]()
-    var qnorm = List[DevBuf]()
-    var knorm = List[DevBuf]()
-    var gate_up = List[QMat]()
-    var down = List[QMat]()
-    var layer_scalar = List[Float32]()
-    var pli_gate = List[QMat]()
-    var pli_proj = List[QMat]()
-    var pli_post_norm = List[DevBuf]()
-    var is_full = List[Bool]()
+    # One entry per decoder layer in every list below.
+    var ln1 = List[DevBuf](capacity=E_NLAYERS)
+    var ln_post_attn = List[DevBuf](capacity=E_NLAYERS)
+    var ln_pre_ff = List[DevBuf](capacity=E_NLAYERS)
+    var ln_post_ff = List[DevBuf](capacity=E_NLAYERS)
+    var qkv = List[QMat](capacity=E_NLAYERS)
+    var ow = List[QMat](capacity=E_NLAYERS)
+    var qnorm = List[DevBuf](capacity=E_NLAYERS)
+    var knorm = List[DevBuf](capacity=E_NLAYERS)
+    var gate_up = List[QMat](capacity=E_NLAYERS)
+    var down = List[QMat](capacity=E_NLAYERS)
+    var layer_scalar = List[Float32](capacity=E_NLAYERS)
+    var pli_gate = List[QMat](capacity=E_NLAYERS)
+    var pli_proj = List[QMat](capacity=E_NLAYERS)
+    var pli_post_norm = List[DevBuf](capacity=E_NLAYERS)
+    var is_full = List[Bool](capacity=E_NLAYERS)
 
     # KV sharing: layers ≥ FIRST_KV_SHARED reuse the last same-type layer's KV from
     # the pre-shared range; layers below compute (and cache) their own. Unlike e2b,
     # the e4b checkpoint ships NO k_proj/v_proj/k_norm for the shared layers.
     comptime FIRST_KV_SHARED = E_NLAYERS - 18  # 24
-    var kv_src = List[Int]()
+    var kv_src = List[Int](capacity=E_NLAYERS)
     var last_sliding = 0
     var last_full = 0
 
