@@ -12,6 +12,7 @@ permissions:
   contents: read
   pull-requests: write
   statuses: write
+  
 
 jobs:
   cla:
@@ -27,7 +28,7 @@ jobs:
           path-to-signatures: 'signatures/version1/cla.json'
           path-to-document: 'https://github.com/millfolio/.github/blob/main/CLA.md'
           branch: 'main'
-          allowlist: winding-lines,dependabot[bot],*[bot]
+          allowlist: winding-lines,dependabot[bot],*[bot],noreply@anthropic.com
           # signatures are stored centrally so one signature covers every repo
           remote-organization-name: millfolio
           remote-repository-name: .github
