@@ -1,12 +1,14 @@
 """Gate: the inference server accepts connections as soon as it is BOUND, before
-it serves — so `mill start` no longer refuses connections while the model loads.
+it serves — so `mill start` never sees ConnectionRefused while the model loads.
 `pixi run test-server-bind`. Pure CPU (loopback sockets), no GPU / weights.
 
-server.mojo's main() binds + listen()s up front, THEN loads weights, THEN serve()s;
-a client that connects during the ~10-15s load is completed by the kernel into the
-listen backlog instead of getting ConnectionRefused (its request just waits until
-accept() runs). This pins that property: a bound, not-yet-accepting TcpListener
-still completes client connects — exactly what HttpServer.bind() relies on.
+server.mojo's main() binds up front, then serve()s IMMEDIATELY while a detached
+loader thread loads the weights (BootApi answers /v1/status with loading/ready/
+error and 503s inference until ready). The bind-before-serve property this gate
+pins still covers the tiny window between bind and the reactor's first accept():
+a bound, not-yet-accepting TcpListener completes client connects into the listen
+backlog — exactly what HttpServer.bind() relies on. (The loading/ready/error
+behavior itself needs the built binary + a Metal machine: `pixi run boot-smoke`.)
 """
 
 from flare.tcp.listener import TcpListener
