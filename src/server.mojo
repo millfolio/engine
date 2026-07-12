@@ -23,6 +23,7 @@ single-threaded here — one request in flight at a time (max-backend §10 #4).
     curl -s localhost:8000/v1/chat/completions -d '{"messages":[{"role":"user","content":"hi"}]}'
 """
 
+from std.atomic import fence
 from std.gpu.host import DeviceContext
 from std.memory import alloc
 from std.time import perf_counter_ns
@@ -32,6 +33,7 @@ from std.os.path import exists, isdir
 
 from flare.prelude import *
 from flare.http import Handler, SseChannel, SseEvent, sse_response
+from flare.runtime._thread import ThreadHandle, _OpaquePtr
 
 from std.utils import Variant
 from model import (
@@ -2367,28 +2369,168 @@ def load_config() -> Config:
     return Config(port, model^, embed_model^, q4, kv_mb)
 
 
-def main() raises:
-    """Entry point: load config, bind/listen, load the model(s), then serve requests until shutdown.
+# ── boot status: the port answers from the moment it binds ──────────────────
+# The weight load (~10 s for the small models, minutes for the 12B) runs on a
+# detached loader thread while the reactor serves instantly: GET /v1/status
+# reports loading (with a phase) / ready / error (e.g. "model not downloaded"),
+# and every other endpoint returns 503 with that reason until the model is up.
+# The mill CLI and the macOS app poll /v1/status and show progress instead of
+# hanging on a silent socket; a missing checkpoint becomes a reportable error
+# state instead of a launchd crash loop. /v1/version stays non-200 until ready
+# on purpose — older CLIs treat a 200 there as "ready".
+#
+# Cross-thread rules (same discipline as flare's scheduler stopping flag — the
+# stdlib has fence() but no Movable Atomic to embed in a heap struct): `state`
+# and `phase` are single aligned words (atomic loads/stores on arm64/x86-64);
+# every String/pointer payload is written exactly ONCE, before the word flip
+# that publishes it, with a fence() between payload write and flip on the
+# writer and between flip read and payload read on the reader.
+
+comptime BOOT_LOADING = 0
+comptime BOOT_READY = 1
+comptime BOOT_ERROR = 2
+
+comptime PHASE_START = 0  # resolving the checkpoint; model_id not yet readable
+comptime PHASE_TOKENIZER = 1  # model_id is published from this flip on
+comptime PHASE_WEIGHTS = 2
+comptime PHASE_EMBED = 3
+comptime PHASE_WARMUP = 4
+
+
+def _phase_name(p: Int) -> String:
+    """Human-readable /v1/status phase label for a PHASE_* value."""
+    if p == PHASE_TOKENIZER:
+        return "loading the tokenizer"
+    if p == PHASE_WEIGHTS:
+        return "loading model weights"
+    if p == PHASE_EMBED:
+        return "loading the embedding model"
+    if p == PHASE_WARMUP:
+        return "warming up GPU kernels"
+    return "starting"
+
+
+struct BootState(Movable):
+    """Loader-thread → reactor shared cell (see the module comment above)."""
+
+    var state: Int64
+    """BOOT_LOADING / BOOT_READY / BOOT_ERROR (single-word, see rules above)."""
+    var phase: Int64
+    """PHASE_* while loading."""
+    var model_id: String
+    """The model spec being loaded; published by the PHASE_TOKENIZER flip."""
+    var error: String
+    """Why loading failed; published by the BOOT_ERROR flip."""
+    var sp: Optional[UnsafePointer[ServerState, MutUntrackedOrigin]]
+    """The ready ServerState; published by the BOOT_READY flip."""
+
+    def __init__(out self):
+        self.state = BOOT_LOADING
+        self.phase = PHASE_START
+        self.model_id = String("")
+        self.error = String("")
+        self.sp = None
+
+
+@fieldwise_init
+struct BootApi(Copyable, Handler, Movable):
+    """Wraps `Api`: delegates once the model is ready; until then answers
+    /health + /v1/status instantly and 503s everything else with the reason."""
+
+    var boot: UnsafePointer[BootState, MutUntrackedOrigin]
+    """Pointer to the shared BootState cell (heap-allocated in main)."""
+
+    def serve(self, req: Request) raises -> Response:
+        """Route by boot state: ready → the real Api; loading/error → status.
+
+        Args:
+            req: The incoming HTTP request.
+
+        Returns:
+            The delegated Api Response when ready; otherwise a status/health
+            200 or a 503 explaining the loading/error state.
+
+        Raises:
+            Error: if the delegated endpoint fails.
+        """
+        var st = Int(self.boot[].state)
+        fence()
+        if st == BOOT_READY and Bool(self.boot[].sp):
+            if req.url == "/v1/status":
+                return ok_json(
+                    '{"state":"ready","model":"'
+                    + esc(self.boot[].sp.value()[].model_id)
+                    + '","version":"'
+                    + MILLFOLIO_VERSION
+                    + '"}'
+                )
+            return Api(self.boot[].sp.value()).serve(req)
+        if req.url == "/health":
+            return ok("millfolio ok")
+        if st == BOOT_ERROR:
+            var msg = esc(self.boot[].error)
+            if req.url == "/v1/status":
+                return ok_json(
+                    '{"state":"error","error":"'
+                    + msg
+                    + '","version":"'
+                    + MILLFOLIO_VERSION
+                    + '"}'
+                )
+            return service_unavailable(
+                '{"error":{"type":"engine_error","message":"' + msg + '"}}'
+            )
+        var phase = Int(self.boot[].phase)
+        fence()
+        var model = String("")
+        if phase >= PHASE_TOKENIZER:
+            model = self.boot[].model_id.copy()
+        if req.url == "/v1/status":
+            return ok_json(
+                '{"state":"loading","phase":"'
+                + _phase_name(phase)
+                + '","model":"'
+                + esc(model)
+                + '","version":"'
+                + MILLFOLIO_VERSION
+                + '"}'
+            )
+        return service_unavailable(
+            '{"error":{"type":"loading","message":"the model is still loading'
+            " ("
+            + _phase_name(phase)
+            + ') — retry shortly"}}'
+        )
+
+
+def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
+    """pthread start routine: run the load, publish READY or ERROR. Non-raising
+    by signature (pthread has no exception channel)."""
+    var b = UnsafePointer[BootState, MutUntrackedOrigin](
+        unsafe_from_address=Int(arg)
+    )
+    try:
+        _boot_load(b)
+    except e:
+        b[].error = String(e)
+        fence()
+        b[].state = BOOT_ERROR
+        print("engine load failed: ", String(e), sep="")
+    return arg
+
+
+def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
+    """The whole model load, off the serving thread: resolve the checkpoint,
+    load tokenizer + weights (+ the embedding model), build the ServerState,
+    warm up, then publish it to `b` (BOOT_READY). The reactor owns all GPU work
+    after the flip; this thread touches nothing afterwards.
 
     Raises:
-        Error: if binding, model loading, or serving fails.
+        Error: if the checkpoint is missing or any load step fails — the
+            caller (`_boot_worker`) converts it into the BOOT_ERROR state.
     """
     # Config: ~/.config/millfolio/config.json (+ env). Path override: $MILLFOLIO_CONFIG.
     var cfg = load_config()
-
-    # Bind + listen BEFORE the (slow ~10-15s) weight load so a client connecting
-    # while the model loads is accepted + queued by the kernel (listen backlog 128)
-    # instead of getting ConnectionRefused. We don't accept()/serve() until the
-    # model is ready — the request just waits in the socket buffer — so `mill start`
-    # stops racing the weight load: connections succeed immediately, the first
-    # response just lands once weights are up. (TcpListener.bind calls listen().)
-    var srv = HttpServer.bind(SocketAddr.localhost(UInt16(cfg.port)))
-    print(
-        "listening on http://127.0.0.1:",
-        cfg.port,
-        " — loading model; requests are queued until it's ready…",
-        sep="",
-    )
     # Checkpoint selection: `serve <hf-id-or-path>` (CLI) > $QWEN_SAFETENSORS >
     # config `model` > meta.txt. An HF id resolves to its cached snapshot dir; the
     # served model id (reported by /v1/models) is that id, else derived from the arch.
@@ -2423,6 +2565,19 @@ def main() raises:
                     read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
                 ).strip()
             )
+
+    # Publish the spec for /v1/status, then verify it exists on disk — a
+    # missing model becomes a status the CLI/app can show ("model not
+    # downloaded"), not a crash loop under launchd.
+    b[].model_id = model_id.copy() if model_id.byte_length() > 0 else ckpt.copy()
+    if not (exists(ckpt) or isdir(ckpt)):
+        raise Error(
+            "model not downloaded: "
+            + (model_id if model_id.byte_length() > 0 else ckpt)
+            + " — download it from the app's model menu, or run `mill install`"
+        )
+    fence()
+    b[].phase = PHASE_TOKENIZER
 
     # Optional group-128 int4 weights (QWEN_Q4=1). Projection weights become int4
     # (embed/lm-head stays bf16); ~4x smaller + ~2x faster decode, at a quality
@@ -2477,6 +2632,7 @@ def main() raises:
     var p_cfg: ModelConfig
     var model: Variant[Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights]
     var gemm_path = String("simdgroup-matrix (~4.5x)")
+    b[].phase = PHASE_WEIGHTS
     if family == FAMILY_GEMMA and _is_e2b_ckpt(ckpt_dir):
         # Gemma-4 effective-2B (PLE + KV-sharing). int4 by default (~1.4 GB) — a
         # small model that fits ~16 GB. Same gemma tokenizer/template as the 12B.
@@ -2668,6 +2824,7 @@ def main() raises:
     var embed_w = Optional[Weights](None)
     var embed_tok = Optional[Tokenizer](None)
     var embed_id = String("")
+    b[].phase = PHASE_EMBED
     if p_arch == 2:
         print("  embeddings: served by the primary model (arch==2)")
     else:
@@ -2763,12 +2920,22 @@ def main() raises:
     # Pre-compile every generative GPU pipeline off the serving path (skip the
     # embed-only primary, which has no generative forward). See `_warmup`.
     if not primary_is_embed:
+        b[].phase = PHASE_WARMUP
         print("  warming up GPU kernels…")
         _warmup(sp[])
-    var api = Api(sp)
+
+    # Publish: from the next request on, BootApi delegates to Api(sp) and the
+    # reactor thread owns all GPU work (sequential handoff via the fence).
+    b[].sp = Optional[UnsafePointer[ServerState, MutUntrackedOrigin]](
+        UnsafePointer[ServerState, MutUntrackedOrigin](
+            unsafe_from_address=Int(sp)
+        )
+    )
+    fence()
+    b[].state = BOOT_READY
 
     print(
-        "millfolio serving on http://127.0.0.1:",
+        "millfolio ready on http://127.0.0.1:",
         cfg.port,
         "  (flare)  v",
         MILLFOLIO_VERSION,
@@ -2784,6 +2951,42 @@ def main() raises:
         print("  POST /v1/embeddings        (", banner_model_id, ")", sep="")
     else:
         print("  POST /v1/embeddings        (no embed model — 503)")
-    # The listener was bound up front (above) so connections during the weight
-    # load weren't refused; now that the model is ready, start accepting + serving.
-    srv.serve(api^)
+
+
+def main() raises:
+    """Entry point: bind + serve immediately; the model loads on a detached
+    thread and /v1/status reports progress until it's ready (see BootApi).
+
+    Raises:
+        Error: if binding, spawning the loader thread, or serving fails.
+    """
+    # Config: ~/.config/millfolio/config.json (+ env). Path override: $MILLFOLIO_CONFIG.
+    # The loader thread re-reads it for the model/q4/kv settings; main only
+    # needs the port.
+    var cfg = load_config()
+
+    # Bind + SERVE before the (slow) weight load: /v1/status + /health answer
+    # immediately (loading / ready / error), inference endpoints 503 with the
+    # reason until ready — so `mill start` and the app can show progress
+    # instead of hanging on a queued socket, and a missing model reports
+    # itself instead of crash-looping.
+    var srv = HttpServer.bind(SocketAddr.localhost(UInt16(cfg.port)))
+    print(
+        "listening on http://127.0.0.1:",
+        cfg.port,
+        " — the model is loading; GET /v1/status for progress…",
+        sep="",
+    )
+    var boot = alloc[BootState](1)
+    boot.init_pointee_move(BootState())
+    var th = ThreadHandle.spawn[_boot_worker](
+        _OpaquePtr(unsafe_from_address=Int(boot))
+    )
+    th.detach()
+    srv.serve(
+        BootApi(
+            UnsafePointer[BootState, MutUntrackedOrigin](
+                unsafe_from_address=Int(boot)
+            )
+        )
+    )
