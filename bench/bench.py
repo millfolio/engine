@@ -75,7 +75,17 @@ PROMPTS = [
 ]
 
 
-def _complete(base_url, model, messages, max_tokens, temperature, timeout):
+VERBOSE = [False]
+
+
+def _log(msg):
+    """Step-level progress (--verbose): timestamped, flushed immediately so a
+    hang shows the LAST STARTED request, not silence."""
+    if VERBOSE[0]:
+        print(f"    [{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _complete(base_url, model, messages, max_tokens, temperature, timeout, tag=""):
     """One non-streaming completion. Returns dict: total_s, prompt_tokens,
     completion_tokens (from usage if present, else the requested max_tokens), text."""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -90,13 +100,23 @@ def _complete(base_url, model, messages, max_tokens, temperature, timeout):
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
+    nchars = sum(len(m.get("content") or "") for m in messages)
+    _log(f"→ {tag or 'request'}: POST max_tokens={max_tokens} prompt~{nchars}ch (timeout {timeout}s)")
     t0 = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        doc = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode())
+    except Exception as e:
+        _log(f"✗ {tag or 'request'}: failed after {time.perf_counter() - t0:.1f}s — {e}")
+        raise
     total_s = time.perf_counter() - t0
     usage = doc.get("usage") or {}
     choices = doc.get("choices") or [{}]
     text = ((choices[0].get("message") or {}).get("content")) or ""
+    _log(
+        f"← {tag or 'request'}: {total_s * 1000:.0f} ms  "
+        f"(prompt {usage.get('prompt_tokens')} tok, completion {usage.get('completion_tokens')} tok)"
+    )
     return {
         "total_s": total_s,
         "prompt_tokens": usage.get("prompt_tokens"),
@@ -119,12 +139,12 @@ def _with_nonce(messages):
     return out
 
 
-def _two_point(base_url, model, messages, max_tokens, temperature, timeout):
+def _two_point(base_url, model, messages, max_tokens, temperature, timeout, tag=""):
     """Prefill + decode via the two-point method. T(1) and T(N) get DISTINCT
     nonces so neither reuses the other's cached prefix (which would corrupt the
     decode differencing). Returns (prefill_ms, decode_tps, prompt_tokens, completion_tokens)."""
-    r1 = _complete(base_url, model, _with_nonce(messages), 1, temperature, timeout)
-    rn = _complete(base_url, model, _with_nonce(messages), max_tokens, temperature, timeout)
+    r1 = _complete(base_url, model, _with_nonce(messages), 1, temperature, timeout, tag=tag + " T(1)")
+    rn = _complete(base_url, model, _with_nonce(messages), max_tokens, temperature, timeout, tag=tag + " T(N)")
     prefill_ms = r1["total_s"] * 1000.0
     dtoks = (rn["completion_tokens"] or 0) - (r1["completion_tokens"] or 0)
     dt = rn["total_s"] - r1["total_s"]
@@ -177,15 +197,17 @@ def bench_target(t, cfg):
     per_prompt = {}
     for p in PROMPTS:
         msgs = [{"role": "user", "content": p["text"]}]
-        for _ in range(warmup):
+        for w in range(warmup):
             try:
-                _two_point(base_url, model, msgs, max_tokens, temp, timeout)
+                _two_point(base_url, model, msgs, max_tokens, temp, timeout, tag=f"{p['id']} warmup{w + 1}")
             except Exception as e:
                 print(f"  [{p['id']}] warmup failed: {e}", flush=True)
         prefills, tps, ptoks = [], [], []
-        for _ in range(repeats):
+        for rep in range(repeats):
             try:
-                pf, dtps, pt, _ = _two_point(base_url, model, msgs, max_tokens, temp, timeout)
+                pf, dtps, pt, _ = _two_point(
+                    base_url, model, msgs, max_tokens, temp, timeout, tag=f"{p['id']} run{rep + 1}"
+                )
                 prefills.append(pf)
                 tps.append(dtps)
                 ptoks.append(pt)
@@ -217,7 +239,123 @@ def bench_target(t, cfg):
             f"warm prefill {cw['warm_ms']['median']:7.1f} ms  ({speedup:.2f}x prefix reuse)",
             flush=True,
         )
+
+    # batch-classify: the PRODUCT workload — chunked yes/no over transaction
+    # snippets with a shared instruction prefix (what the AI-tags classifier does).
+    bc = _batch_classify(base_url, model, temp, timeout)
+    per_prompt["_batch_classify"] = bc
+    if bc and bc.get("total_s"):
+        chunk_s = bc["chunk_s"]
+        print(
+            f"  batch      {bc['n_snippets']} snippets in {len(chunk_s)} chunks of "
+            f"{bc['chunk_size']}: total {bc['total_s']:.1f}s  ·  "
+            f"{bc['distinct_per_s']:.1f} distinct/s  ·  "
+            f"chunk1 {chunk_s[0]:.1f}s → chunk{len(chunk_s)} {chunk_s[-1]:.1f}s  ·  "
+            f"{bc['answered']}/{bc['n_snippets']} answered",
+            flush=True,
+        )
     return {"model": model, "prompts": per_prompt}
+
+
+# ── batch-classify scenario ──────────────────────────────────────────────────
+# 40 deterministic transaction descriptions, half grocery-ish — kept stable
+# across runs so the numbers compare. This mirrors the vault's ask_local_batch
+# classifier: one instruction prefix shared by every chunk (so an engine with a
+# prefix cache amortizes it) + N numbered snippets per request + short per-line
+# answers (decode is a few tokens per snippet, not a paragraph).
+_BATCH_INSTRUCTION = (
+    "You are labeling bank-transaction descriptions. For each numbered snippet "
+    "answer exactly 'yes' if it is a grocery store or supermarket purchase (food "
+    "shopping), else exactly 'no' (dining out, coffee, gas, and any non-grocery "
+    "charge are 'no'). Reply with one line per snippet, formatted exactly as "
+    "'<number>: yes' or '<number>: no', nothing else.\n\n"
+)
+
+_BATCH_SNIPPETS = [
+    "WHOLE FOODS MARKET #10236 SEATTLE WA",
+    "SHELL OIL 57444231 PORTLAND OR",
+    "SAFEWAY STORE 1729 DEBIT PURCHASE",
+    "STARBUCKS #4821 CARD PURCHASE",
+    "TRADER JOES #517 POS DEBIT",
+    "NETFLIX.COM MONTHLY SUBSCRIPTION",
+    "KROGER #442 GROCERY BAKERY",
+    "UNITED AIRLINES TICKET 016240",
+    "COSTCO WHSE #0745 MEMBER PURCHASE",
+    "CHIPOTLE ONLINE ORDER 8842",
+    "ALBERTSONS MARKET #3310",
+    "SHELL SERVICE STATION CAR WASH",
+    "H MART FOOD MARKET 220",
+    "AMC THEATRES 0091 CONCESSIONS",
+    "SPROUTS FARMERS MKT #86",
+    "UBER TRIP 55XJ2 SAN FRANCISCO",
+    "ALDI 470 GROCERY DEBIT",
+    "PELOTON MEMBERSHIP RENEWAL",
+    "PUBLIX SUPER MARKET #1451",
+    "CHEVRON 0209155 GAS PURCHASE",
+    "WEGMANS FOOD MARKETS 084",
+    "DUNKIN #349811 MOBILE ORDER",
+    "FRED MEYER GROCERY 00071",
+    "DELTA AIR BAGGAGE FEE 006",
+    "LIDL US STORE 2205",
+    "OLIVE GARDEN 0044 DINNER",
+    "WINCO FOODS #58 POS",
+    "APPLE.COM/BILL ICLOUD STORAGE",
+    "PIGGLY WIGGLY 0672 GROCERY",
+    "MARATHON PETRO 66011 FUEL",
+    "GIANT EAGLE STORE 6521",
+    "PANERA BREAD 204561 LUNCH",
+    "FOOD LION #1622 DEBIT",
+    "HILTON HOTELS FRONT DESK",
+    "MEIJER STORE #254 GROCERY",
+    "LYFT RIDE THU 10PM",
+    "STOP & SHOP 0631 PURCHASE",
+    "REGAL CINEMAS TICKETS 1109",
+    "VONS GROCERY STORE 2118",
+    "EXXONMOBIL 97514 GAS",
+]
+
+_BATCH_CHUNK = 10
+
+
+def _batch_classify(base_url, model, temp, timeout):
+    """Send the 40 snippets in sequential chunks of _BATCH_CHUNK, each request =
+    the SAME instruction prefix + that chunk's numbered snippets. Reports total
+    wall time, distinct/s, per-chunk seconds (chunk 1 pays the cold instruction
+    prefill; later chunks show what the engine's prefix cache is worth), and how
+    many snippets came back with a parseable yes/no line."""
+    chunks = [
+        _BATCH_SNIPPETS[i : i + _BATCH_CHUNK]
+        for i in range(0, len(_BATCH_SNIPPETS), _BATCH_CHUNK)
+    ]
+    session = f"[batch {time.time_ns()}] "  # fresh cache lineage per run
+    chunk_s, answered = [], 0
+    t0 = time.perf_counter()
+    for ci, chunk in enumerate(chunks):
+        lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(chunk))
+        msgs = [{"role": "user", "content": session + _BATCH_INSTRUCTION + lines}]
+        try:
+            r = _complete(
+                base_url, model, msgs, 8 * len(chunk) + 16, temp, timeout,
+                tag=f"batch chunk{ci + 1}/{len(chunks)}",
+            )
+        except Exception as e:
+            print(f"  batch chunk{ci + 1} failed: {e}", flush=True)
+            return None
+        chunk_s.append(r["total_s"])
+        for line in (r["text"] or "").splitlines():
+            token = line.split(":", 1)[-1].strip().lower().rstrip(".")
+            if token in ("yes", "no"):
+                answered += 1
+    total_s = time.perf_counter() - t0
+    n = len(_BATCH_SNIPPETS)
+    return {
+        "n_snippets": n,
+        "chunk_size": _BATCH_CHUNK,
+        "total_s": total_s,
+        "distinct_per_s": n / total_s if total_s > 0 else 0.0,
+        "chunk_s": chunk_s,
+        "answered": answered,
+    }
 
 
 def _cold_warm(base_url, model, max_tokens, temp, timeout, repeats):
@@ -231,15 +369,15 @@ def _cold_warm(base_url, model, max_tokens, temp, timeout, repeats):
         turn1 = [{"role": "user", "content": nonce + base_ctx + "\n\nSummarize in one sentence."}]
         try:
             # cold prefill = T(1) of the fresh long conversation
-            c = _complete(base_url, model, turn1, 1, temp, timeout)
+            c = _complete(base_url, model, turn1, 1, temp, timeout, tag=f"cold/warm run{i + 1} cold")
             cold_ms.append(c["total_s"] * 1000.0)
             # produce a real assistant turn, then a short follow-up; warm prefill = T(1)
-            a = _complete(base_url, model, turn1, max_tokens, temp, timeout)
+            a = _complete(base_url, model, turn1, max_tokens, temp, timeout, tag=f"cold/warm run{i + 1} gen")
             turn2 = turn1 + [
                 {"role": "assistant", "content": a["text"]},
                 {"role": "user", "content": "Now list two risks in two bullets."},
             ]
-            w = _complete(base_url, model, turn2, 1, temp, timeout)
+            w = _complete(base_url, model, turn2, 1, temp, timeout, tag=f"cold/warm run{i + 1} warm")
             warm_ms.append(w["total_s"] * 1000.0)
         except Exception as e:
             print(f"  cold/warm run failed: {e}", flush=True)
@@ -256,7 +394,12 @@ def main():
     ap.add_argument("--cooldown", type=float, help="seconds to sleep between targets")
     ap.add_argument("--doctor", action="store_true", help="only report which targets are reachable")
     ap.add_argument("--out", default="", help="write JSON results to this path")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="log every request start/finish (a hang shows the last started request)")
+    ap.add_argument("--timeout", type=float,
+                    help="per-request timeout in seconds (default from config, 600)")
     args = ap.parse_args()
+    VERBOSE[0] = args.verbose
 
     with open(args.config) as f:
         cfg = json.load(f)
@@ -265,6 +408,8 @@ def main():
             cfg[k] = v
     cfg.setdefault("temperature", 0.0)
     cfg.setdefault("timeout", 600)
+    if args.timeout is not None:
+        cfg["timeout"] = args.timeout
     if args.cooldown is not None:
         cfg["cooldown"] = args.cooldown
 
@@ -321,6 +466,17 @@ def _print_summary(results):
             pf_s = f"{pf['median']:.1f}" if pf else "-"
             tps_s = f"{tps['median']:.1f}" if tps else "-"
             print(f"    {label:<20} {model:<34} {pf_s:>10} {tps_s:>8}")
+    print(f"\n  batch-classify (the product workload: chunked yes/no, shared instruction prefix):")
+    print(f"    {'engine':<20} {'total s':>8} {'distinct/s':>11} {'chunk1 s':>9} {'chunkN s':>9} {'answered':>9}")
+    for label, r in results.items():
+        bc = r["prompts"].get("_batch_classify")
+        if bc and bc.get("total_s"):
+            print(
+                f"    {label:<20} {bc['total_s']:>8.1f} {bc['distinct_per_s']:>11.1f} "
+                f"{bc['chunk_s'][0]:>9.1f} {bc['chunk_s'][-1]:>9.1f} "
+                f"{str(bc['answered']) + '/' + str(bc['n_snippets']):>9}"
+            )
+
     print(f"\n  cold->warm prefix reuse (TTFT ms, lower warm = caching works):")
     print(f"    {'engine':<20} {'cold':>9} {'warm':>9} {'reuse':>7}")
     for label, r in results.items():

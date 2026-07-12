@@ -23,7 +23,20 @@ Unreachable targets are skipped, so benchmark whatever is up.
 pixi run bench --doctor                 # which endpoints are reachable
 pixi run bench                          # benchmark all reachable targets
 pixi run bench -- --only millfolio,ollama-3b --repeats 7 --out bench/results/run.json
+pixi run bench -- --only mlx --verbose --timeout 120   # debug a hang: logs each request
 ```
+
+`--verbose` logs every request start/finish with a timestamp, so a hang shows
+the last STARTED request instead of silence; `--timeout` caps each request
+(default 600 s — lower it when diagnosing so a stuck request fails fast).
+
+Besides the prompt suite and the cold/warm prefix test, each target runs a
+**batch-classify** scenario — the product workload: 40 canned transaction
+descriptions, chunked 10 per request under one shared instruction prefix,
+answered as short per-line yes/no. It reports total time, distinct/s,
+per-chunk seconds (chunk 1 pays the cold instruction prefill; later chunks
+show what the engine's prefix cache is worth), and how many snippets parsed
+to a yes/no answer.
 
 ## Starting each engine
 
