@@ -127,6 +127,9 @@ int8-gemv-bench = { cmd = "mkdir -p build && mojo build tests/manual/int8_gemv_b
 # wired int4 vs bf16 top-1/KL on the real model (needs weights). int4-quality:
 # fake-quant scheme sweep (int8/int4 per-channel/group) vs bf16 (needs weights).
 q4-kernels = { cmd = "mkdir -p build && mojo build tests/manual/q4_kernels.mojo -I src -o build/q4_kernels && ./build/q4_kernels" }
+# Multi-row decode GEMV prototype (R output rows per simdgroup) — correctness
+# vs CPU + R-sweep bench vs the shipping kernel on the 3B decode shapes.
+q4-gemv-mr = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mr.mojo -I src -o build/q4_gemv_mr && ./build/q4_gemv_mr" }
 q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../jinja2.mojo/src -o build/q4_validate && ./build/q4_validate" }
 int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../jinja2.mojo/src -o build/int4_quality && ./build/int4_quality" }
 # End-to-end Gemma serving-path smoke test (template -> tokenizer -> persistent
