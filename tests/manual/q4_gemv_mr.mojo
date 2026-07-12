@@ -28,10 +28,12 @@ shapes. Weight-GB/s = packed bytes / kernel time (the metric decode lives on).
 from std.math import ceildiv
 from std.sys import has_accelerator
 from std.time import perf_counter_ns
-from std.gpu import global_idx, WARP_SIZE
+from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
+from std.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum
 from std.gpu.host import DeviceContext
 from std.collections import InlineArray
+from std.memory import stack_allocation
 from layout import TileTensor, TensorLayout, row_major
 from kernels import matmul_q4_kernel
 
@@ -117,6 +119,169 @@ def matmul_q4_mr_kernel[
             Y[n0 + r] = rebind[Y.ElementType](total)
 
 
+def matmul_q4_rw_kernel[
+    LT: TensorLayout, R: Int, W: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """Decode GEMV (M=1): R rows × W K-slice warps per threadgroup.
+
+    Each threadgroup owns R adjacent output rows; each row gets W warps, each
+    sweeping a disjoint K-slice (octs strided W*WARP_SIZE). Warp partials meet
+    in threadgroup memory; the first R lanes of warp 0 fold W partials per row.
+    Motivation: at K=2048 a single warp covers a whole row in ONE 256-bit load
+    per lane — pure latency, and only N warps to hide it (a square 2048×2048
+    measures 29 GB/s while 11008-row shapes reach 80 with the SAME inner loop).
+    W-splitting multiplies the warps in flight per row without changing the
+    per-lane memory pattern.
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        R: Output rows per threadgroup.
+        W: Warps per row (K-slices).
+
+    Args:
+        X: Input activations [1, K] (f32).
+        P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
+        S: Per-group f32 scales [N, NG].
+        B: Bias [N] (f32), added when use_bias != 0.
+        Y: Output [1, N] (f32).
+        K: Contraction (input) dimension.
+        N: Number of output channels.
+        NG: Groups per row (K / Q4_GROUP).
+        use_bias: Add B when nonzero.
+    """
+    comptime assert X.flat_rank == 1
+    var n0 = Int(block_idx.x) * R
+    var wid = Int(thread_idx.x) // WARP_SIZE  # warp within threadgroup
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var r = wid % R  # row within the tile
+    var w = wid // R  # K-slice index
+    var n = n0 + r
+    var words = K // 8
+    var octs = words // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var sp = S.ptr
+    var part = stack_allocation[
+        R * W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var acc = Float32(0.0)
+    if n < N:  # warp-uniform (n0, r are per-warp constants)
+        for q in range(w * WARP_SIZE + lane, octs, W * WARP_SIZE):
+            var k0 = q * 64
+            var word8 = (pp + n * words + q * 8).load[width=8]()
+            var s = sp[n * NG + (k0 >> Q4_SHIFT)]
+            var racc = Float32(0.0)
+            comptime for j in range(8):
+                var nibs = (SIMD[DType.uint32, 8](word8[j]) >> _Q4_SHIFTS) & 0xF
+                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]()
+                var xv = (xp + k0 + j * 8).load[width=8]()
+                racc += (qf * xv).reduce_add()
+            acc += racc * rebind[Float32](s)
+    var p = warp_sum(acc)
+    if lane == 0:
+        part[r * W + w] = p
+    barrier()
+    # First warp folds the W partials for each row (lanes 0..R-1, one row each).
+    if wid == 0 and lane < R and n0 + lane < N:
+        var total = Float32(0.0)
+        comptime for i in range(W):
+            total += part[lane * W + i]
+        if use_bias != 0:
+            total += rebind[Scalar[DType.float32]](B[n0 + lane])
+        Y[n0 + lane] = rebind[Y.ElementType](total)
+
+
+def matmul_q4_mrw_kernel[
+    LT: TensorLayout, R: Int, W: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """Decode GEMV (M=1): the mr and rw ideas COMPOSED. A threadgroup owns R
+    adjacent rows; its W warps each sweep a disjoint K-slice carrying ALL R
+    rows — so each x oct is loaded once per warp and reused for R weight
+    streams (the square-shape fix: x-issue traffic /R), while W warps per row
+    tile keep enough warps in flight to hide load latency (the rw fix). Warp
+    partials for each row meet in threadgroup memory.
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        R: Rows per threadgroup (each warp carries all R).
+        W: K-slice warps.
+
+    Args:
+        X: Input activations [1, K] (f32).
+        P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
+        S: Per-group f32 scales [N, NG].
+        B: Bias [N] (f32), added when use_bias != 0.
+        Y: Output [1, N] (f32).
+        K: Contraction (input) dimension.
+        N: Number of output channels.
+        NG: Groups per row (K / Q4_GROUP).
+        use_bias: Add B when nonzero.
+    """
+    comptime assert X.flat_rank == 1
+    var n0 = Int(block_idx.x) * R
+    var w = Int(thread_idx.x) // WARP_SIZE  # K-slice index (warp id)
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var words = K // 8
+    var octs = words // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var sp = S.ptr
+    var part = stack_allocation[
+        R * W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var acc = InlineArray[Float32, R](fill=0.0)
+    for q in range(w * WARP_SIZE + lane, octs, W * WARP_SIZE):
+        var k0 = q * 64
+        var w8 = InlineArray[SIMD[DType.uint32, 8], R](fill=0)
+        comptime for r in range(R):
+            if n0 + r < N:  # warp-uniform guard
+                w8[r] = (pp + (n0 + r) * words + q * 8).load[width=8]()
+        var xv = InlineArray[SIMD[DType.float32, 8], 8](fill=0)
+        comptime for j in range(8):
+            xv[j] = (xp + k0 + j * 8).load[width=8]()
+        comptime for r in range(R):
+            if n0 + r < N:
+                var s = sp[(n0 + r) * NG + (k0 >> Q4_SHIFT)]
+                var racc = Float32(0.0)
+                comptime for j in range(8):
+                    var nibs = (SIMD[DType.uint32, 8](w8[r][j]) >> _Q4_SHIFTS) & 0xF
+                    var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]()
+                    racc += (qf * xv[j]).reduce_add()
+                acc[r] += racc * rebind[Float32](s)
+    comptime for r in range(R):
+        var p = warp_sum(acc[r])
+        if lane == 0:
+            part[r * W + w] = p
+    barrier()
+    if w == 0 and lane < R and n0 + lane < N:
+        var total = Float32(0.0)
+        comptime for i in range(W):
+            total += part[lane * W + i]
+        if use_bias != 0:
+            total += rebind[Scalar[DType.float32]](B[n0 + lane])
+        Y[n0 + lane] = rebind[Y.ElementType](total)
+
+
 # ── host helpers (same idioms as q4_kernels.mojo) ────────────────────────────
 
 
@@ -170,8 +335,12 @@ def quantize_g128(
     return (packed^, scales^, deq^)
 
 
-def check[R: Int](ctx: DeviceContext, K: Int, N: Int) raises:
-    """Validate the R-row kernel vs a CPU reference (M=1, bias on)."""
+def check[
+    R: Int, W: Int = 0, MRW: Int = 0
+](ctx: DeviceContext, K: Int, N: Int) raises:
+    """Validate a variant vs a CPU reference (M=1, bias on). W=0 → the
+    multi-row kernel; W>0 → the R×W K-split kernel; MRW=1 → the composed
+    kernel (R rows per warp × W K-slices)."""
     var NG = K // Q4_GROUP
     var seed = UInt64(0x1234567 + R * 7 + N * 13 + K)
     var Wh = List[Float32]()
@@ -226,13 +395,28 @@ def check[R: Int](ctx: DeviceContext, K: Int, N: Int) raises:
     var bt = TileTensor(bb, row_major(N))
     var yt = TileTensor(yb, row_major(N))
 
-    comptime k = matmul_q4_mr_kernel[type_of(row_major(1)), R]
-    var warps = ceildiv(N, R)
-    ctx.enqueue_function[k](
-        xt, pt, st, bt, yt, K, N, NG, 1,
-        grid_dim=ceildiv(warps * WARP_SIZE, BLOCK),
-        block_dim=BLOCK,
-    )
+    comptime if W == 0:  # multi-row kernel
+        comptime k = matmul_q4_mr_kernel[type_of(row_major(1)), R]
+        var warps = ceildiv(N, R)
+        ctx.enqueue_function[k](
+            xt, pt, st, bt, yt, K, N, NG, 1,
+            grid_dim=ceildiv(warps * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
+    elif MRW != 0:  # composed: R rows per warp × W K-slices
+        comptime k = matmul_q4_mrw_kernel[type_of(row_major(1)), R, W]
+        ctx.enqueue_function[k](
+            xt, pt, st, bt, yt, K, N, NG, 1,
+            grid_dim=ceildiv(N, R),
+            block_dim=W * WARP_SIZE,
+        )
+    else:  # R rows × W K-slice warps per threadgroup
+        comptime k = matmul_q4_rw_kernel[type_of(row_major(1)), R, W]
+        ctx.enqueue_function[k](
+            xt, pt, st, bt, yt, K, N, NG, 1,
+            grid_dim=ceildiv(N, R),
+            block_dim=R * W * WARP_SIZE,
+        )
     ctx.synchronize()
 
     var md = Float64(0.0)
@@ -252,11 +436,11 @@ def check[R: Int](ctx: DeviceContext, K: Int, N: Int) raises:
                 mr = rf
     var rel = md / mr if mr > 0 else md
     print(
-        "  R=", R, " K=", K, " N=", N, " : max|Δ|=", md, " rel=", rel, " ",
-        "OK" if rel < 1.0e-3 else "FAIL", sep="",
+        "  R=", R, " W=", W, " K=", K, " N=", N, " : max|Δ|=", md,
+        " rel=", rel, " ", "OK" if rel < 1.0e-3 else "FAIL", sep="",
     )
     if rel >= 1.0e-3:
-        raise Error("mr kernel mismatch")
+        raise Error("gemv variant mismatch")
 
 
 def bench(ctx: DeviceContext, K: Int, N: Int) raises:
@@ -303,7 +487,7 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
         sep="",
     )
 
-    comptime for RR in [2, 4, 8]:
+    comptime for RR in [2, 4]:
         comptime km = matmul_q4_mr_kernel[type_of(row_major(1)), RR]
         var warps = ceildiv(N, RR)
         var grid = ceildiv(warps * WARP_SIZE, BLOCK)
@@ -322,7 +506,59 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
         ctx.synchronize()
         var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
         print(
-            "            R=", RR, "  ", ms, " ms  ",
+            "            mr R=", RR, "      ", ms, " ms  ",
+            wbytes / (ms * 1.0e6), " GB/s  (", ship_ms / ms, "x ship)",
+            sep="",
+        )
+
+    comptime for cfg in [(1, 2), (1, 4), (1, 8), (2, 2), (2, 4), (4, 2)]:
+        comptime RR = cfg[0]
+        comptime WW = cfg[1]
+        comptime kw = matmul_q4_rw_kernel[type_of(row_major(1)), RR, WW]
+        var grid = ceildiv(N, RR)
+        var tpb = RR * WW * WARP_SIZE
+        for _ in range(5):
+            ctx.enqueue_function[kw](
+                xt, pt, st, bt, yt, K, N, NG, 0,
+                grid_dim=grid, block_dim=tpb,
+            )
+        ctx.synchronize()
+        var t1 = perf_counter_ns()
+        for _ in range(iters):
+            ctx.enqueue_function[kw](
+                xt, pt, st, bt, yt, K, N, NG, 0,
+                grid_dim=grid, block_dim=tpb,
+            )
+        ctx.synchronize()
+        var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
+        print(
+            "            rw R=", RR, " W=", WW, "  ", ms, " ms  ",
+            wbytes / (ms * 1.0e6), " GB/s  (", ship_ms / ms, "x ship)",
+            sep="",
+        )
+
+    comptime for cfg in [(2, 2), (2, 4), (4, 2), (4, 4), (8, 2)]:
+        comptime RR = cfg[0]
+        comptime WW = cfg[1]
+        comptime kc = matmul_q4_mrw_kernel[type_of(row_major(1)), RR, WW]
+        var grid = ceildiv(N, RR)
+        var tpb = WW * WARP_SIZE
+        for _ in range(5):
+            ctx.enqueue_function[kc](
+                xt, pt, st, bt, yt, K, N, NG, 0,
+                grid_dim=grid, block_dim=tpb,
+            )
+        ctx.synchronize()
+        var t1 = perf_counter_ns()
+        for _ in range(iters):
+            ctx.enqueue_function[kc](
+                xt, pt, st, bt, yt, K, N, NG, 0,
+                grid_dim=grid, block_dim=tpb,
+            )
+        ctx.synchronize()
+        var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
+        print(
+            "            mrw R=", RR, " W=", WW, "  ", ms, " ms  ",
             wbytes / (ms * 1.0e6), " GB/s  (", ship_ms / ms, "x ship)",
             sep="",
         )
@@ -338,6 +574,15 @@ def main() raises:
     check[4](ctx, 256, 130)
     check[8](ctx, 512, 257)
     check[4](ctx, 2048, 512)
+    check[1, 2](ctx, 256, 129)
+    check[1, 4](ctx, 512, 257)
+    check[2, 2](ctx, 256, 130)
+    check[2, 4](ctx, 2048, 511)
+    check[4, 2](ctx, 2048, 513)
+    check[2, 2, 1](ctx, 256, 129)
+    check[2, 4, 1](ctx, 512, 257)
+    check[4, 2, 1](ctx, 2048, 511)
+    check[4, 4, 1](ctx, 2048, 513)
     print("bench (Qwen2.5-3B decode shapes; weight-GB/s, 200 iters):")
     bench(ctx, 2048, 2048)    # q/o proj
     bench(ctx, 2048, 256)     # kv proj (tiny N)
