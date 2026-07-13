@@ -34,6 +34,7 @@ from std.os.path import exists, isdir
 from flare.prelude import *
 from flare.http import Handler, SseChannel, SseEvent, sse_response
 from flare.runtime._thread import ThreadHandle, _OpaquePtr
+from flare.runtime import libc_nanosleep_ms
 
 from std.utils import Variant
 from model import (
@@ -2504,8 +2505,21 @@ struct BootApi(Copyable, Handler, Movable):
 
 
 def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
-    """pthread start routine: run the load, publish READY or ERROR. Non-raising
-    by signature (pthread has no exception channel)."""
+    """pthread start routine: run the load, publish READY or ERROR — then PARK
+    FOREVER instead of exiting. Non-raising by signature (pthread has no
+    exception channel).
+
+    The park is load-bearing, not a leak: the DeviceContext (and its Metal
+    command queue) are created on THIS thread. If this thread exits, the
+    queue's creator dies and — observed on macOS 26 / AGXMetalG16G — a later
+    `commandBufferWithDescriptor:` on the (still alive, still serving) reactor
+    thread blocks forever in a dispatch-semaphore wait after an idle stretch:
+    the engine answered a full bench suite, idled ~12 min, then wedged on the
+    first GPU request (stack: attn_cached → MTLCommandBuffer init →
+    semaphore_wait_trap). Keeping the creating thread alive is the one
+    variable separating that wedge from the previous architecture (queue
+    created + used on the serving thread; never wedged across days of demo
+    uptime). One parked thread costs ~500 KB of stack."""
     var b = UnsafePointer[BootState, MutUntrackedOrigin](
         unsafe_from_address=Int(arg)
     )
@@ -2516,7 +2530,8 @@ def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
         fence()
         b[].state = BOOT_ERROR
         print("engine load failed: ", String(e), sep="")
-    return arg
+    while True:
+        _ = libc_nanosleep_ms(60_000)  # park; wakes only to re-park
 
 
 def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
