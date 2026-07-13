@@ -35,6 +35,8 @@ from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
     BLOCK,
     DevBuf,
+    KVBuf,
+    KV_DTYPE,
     WBuf,
     QMat,
     qmat_bf16,
@@ -199,8 +201,8 @@ struct GemmaWeights(ModelWeights, Movable):
         ctx: DeviceContext,
         l: Int,
         mut h: DevBuf,
-        mut kcs: List[DevBuf],
-        mut vcs: List[DevBuf],
+        mut kcs: List[KVBuf],
+        mut vcs: List[KVBuf],
         Tq: Int,
         q_offset: Int,
         cache_len: Int,
@@ -639,8 +641,8 @@ def _load_scalar(
 def gemma_attn(
     ctx: DeviceContext,
     mut qkv: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     mut qnw: DevBuf,
     mut knw: DevBuf,
     l_full: Bool,
@@ -726,7 +728,7 @@ def gemma_attn(
     var clay = row_major(cache_len)
     var knlay = row_major(head_dim)
     if l_full:
-        comptime kk = rope_k_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, True]
+        comptime kk = rope_k_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, True, KV_DTYPE]
         cached_enqueue[kk](
             ctx,
             TileTensor(qkv, qslay),
@@ -742,7 +744,7 @@ def gemma_attn(
             block_dim=BLOCK,
         )
     else:
-        comptime kk = rope_k_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, True]
+        comptime kk = rope_k_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, True, KV_DTYPE]
         cached_enqueue[kk](
             ctx,
             TileTensor(qkv, qslay),
@@ -762,7 +764,7 @@ def gemma_attn(
     # sliding reads the V slice at v_off.
     var vsrc_off = k_off if l_full else v_off
     if l_full:
-        comptime kv = vnorm_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM]
+        comptime kv = vnorm_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, KV_DTYPE]
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
@@ -775,7 +777,7 @@ def gemma_attn(
             block_dim=BLOCK,
         )
     else:
-        comptime kv = vnorm_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM]
+        comptime kv = vnorm_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, KV_DTYPE]
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
@@ -793,7 +795,7 @@ def gemma_attn(
     var olay = row_major(Tq * q_dim)
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
-        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, FU_HKV, FU_HEAD_DIM]
+        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, FU_HKV, FU_HEAD_DIM, KV_DTYPE]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
@@ -808,7 +810,7 @@ def gemma_attn(
             block_dim=WARP_SIZE,
         )
     else:
-        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM]
+        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM, KV_DTYPE]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
@@ -833,8 +835,8 @@ def gemma_layer(
     mut w: GemmaWeights,
     l: Int,
     mut h: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     Tq: Int,
     q_offset: Int,
     cache_len: Int,
