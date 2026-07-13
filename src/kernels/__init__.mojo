@@ -2196,12 +2196,13 @@ def _head_rrms[
 
 def rope_k_kernel[
     LT: TensorLayout, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
+, KV_DT: DType = DType.float32
 ](
     Kin: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # K source (row = in_stride, K at in_off)
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] cache (rotated)
     Kn: TileTensor[
         DType.float32, LT, MutAnyOrigin
@@ -2270,24 +2271,25 @@ def rope_k_kernel[
             var ang = Float32(pos) * freq
             var c = cos(ang)
             var s = sin(ang)
-            Kc[outbase + d] = rebind[Kc.ElementType](x0 * c - x1 * s)
-            Kc[outbase + d + HALF] = rebind[Kc.ElementType](x1 * c + x0 * s)
+            Kc[outbase + d] = rebind[Kc.ElementType]((x0 * c - x1 * s).cast[KV_DT]())
+            Kc[outbase + d + HALF] = rebind[Kc.ElementType]((x1 * c + x0 * s).cast[KV_DT]())
         else:
-            Kc[outbase + d] = rebind[Kc.ElementType](x0)
-            Kc[outbase + d + HALF] = rebind[Kc.ElementType](x1)
+            Kc[outbase + d] = rebind[Kc.ElementType]((x0).cast[KV_DT]())
+            Kc[outbase + d + HALF] = rebind[Kc.ElementType]((x1).cast[KV_DT]())
 
 
 def rope_kv_kernel[
     LT: TensorLayout, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
+, KV_DT: DType = DType.float32
 ](
     In: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # fused [q|k|v] buffer (row = in_stride)
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] K cache (rotated)
     Vc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] V cache (copied)
     Kn: TileTensor[
         DType.float32, LT, MutAnyOrigin
@@ -2354,14 +2356,14 @@ def rope_kv_kernel[
             var ang = Float32(pos) * freq
             var c = cos(ang)
             var s = sin(ang)
-            Kc[outbase + d] = rebind[Kc.ElementType](x0 * c - x1 * s)
-            Kc[outbase + d + HALF] = rebind[Kc.ElementType](x1 * c + x0 * s)
+            Kc[outbase + d] = rebind[Kc.ElementType]((x0 * c - x1 * s).cast[KV_DT]())
+            Kc[outbase + d + HALF] = rebind[Kc.ElementType]((x1 * c + x0 * s).cast[KV_DT]())
         else:
-            Kc[outbase + d] = rebind[Kc.ElementType](x0)
-            Kc[outbase + d + HALF] = rebind[Kc.ElementType](x1)
+            Kc[outbase + d] = rebind[Kc.ElementType]((x0).cast[KV_DT]())
+            Kc[outbase + d + HALF] = rebind[Kc.ElementType]((x1).cast[KV_DT]())
     # V is copied unrotated (HEAD_DIM contiguous values for this head).
     for d in range(HEAD_DIM):
-        Vc[outbase + d] = rebind[Vc.ElementType](In[vin + d])
+        Vc[outbase + d] = rebind[Vc.ElementType]((In[vin + d]).cast[KV_DT]())
 
 
 def rope_q_kernel[
@@ -2445,14 +2447,15 @@ def rope_q_kernel[
 
 def attn_cached_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int
+, KV_DT: DType = DType.float32
 ](
     Q: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] RoPE-rotated, row = abs position
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    Vc: TileTensor[KV_DT, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
     O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
@@ -2516,14 +2519,14 @@ def attn_cached_kernel[
         var kbase = (j * HKV + kvh) * HEAD_DIM
         var s = SIMD[DType.float32, VEC](0.0)
         for c in range(NVEC):
-            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC)
+            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
         var score = s.reduce_add() * scale
         var m_new = max(m, score)
         var corr = exp(m - m_new)
         var p = exp(score - m_new)
         l = l * corr + p
         for c in range(NVEC):
-            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC)
+            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
         m = m_new
 
     # Cross-lane merge: global max, rescale each lane's partials, then sum.
@@ -2540,14 +2543,15 @@ def attn_cached_kernel[
 
 def attn_cached_rope_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int, QK_NORM: Bool = False
+, KV_DT: DType = DType.float32
 ](
     Q: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # RAW Q slice (row = q_stride, Q at q_off) — NOT pre-rotated
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] RoPE-rotated cache
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    Vc: TileTensor[KV_DT, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
     Qn: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # [HEAD_DIM] q_norm weight (dummy if !QK_NORM)
@@ -2628,14 +2632,14 @@ def attn_cached_rope_kernel[
         var kbase = (j * HKV + kvh) * HEAD_DIM
         var s = SIMD[DType.float32, VEC](0.0)
         for c in range(NVEC):
-            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC)
+            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
         var score = s.reduce_add() * scale
         var m_new = max(m, score)
         var corr = exp(m - m_new)
         var p = exp(score - m_new)
         l = l * corr + p
         for c in range(NVEC):
-            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC)
+            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
         m = m_new
 
     var m_g = warp_max(m)
@@ -2655,14 +2659,15 @@ comptime FLASH_BK = WARP_SIZE  # flash keys per tile = one per lane
 
 def flash_attn_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int, PW: Int
+, KV_DT: DType = DType.float32
 ](
     Q: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] rotated, row = abs pos
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    Vc: TileTensor[KV_DT, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
     O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
@@ -2755,8 +2760,8 @@ def flash_attn_kernel[
             var gk = kt0 + r
             if gk <= kpos_max:
                 var src = (gk * HKV + kvh) * HEAD_DIM + c
-                Ks[idx] = rebind[Scalar[DType.float32]](Kc[src])
-                Vs[idx] = rebind[Scalar[DType.float32]](Vc[src])
+                Ks[idx] = rebind[Scalar[KV_DT]](Kc[src]).cast[DType.float32]()
+                Vs[idx] = rebind[Scalar[KV_DT]](Vc[src]).cast[DType.float32]()
             else:
                 Ks[idx] = Float32(0.0)
                 Vs[idx] = Float32(0.0)
@@ -2796,14 +2801,15 @@ def flash_attn_kernel[
 
 def tc_attn_kernel[
     LT: TensorLayout, HQ: Int, HKV: Int, HEAD_DIM: Int
+, KV_DT: DType = DType.float32
 ](
     Q: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # [Tq, HQ, HEAD_DIM] *RoPE-rotated*
     Kc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] rotated, row = abs pos
-    Vc: TileTensor[DType.float32, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
+    Vc: TileTensor[KV_DT, LT, MutAnyOrigin],  # [max, HKV, HEAD_DIM]
     O: TileTensor[DType.float32, LT, MutAnyOrigin],  # [Tq, HQ, HEAD_DIM]
     Tq: Int,
     q_offset: Int,
@@ -2908,7 +2914,7 @@ def tc_attn_kernel[
             comptime for s in range(_FRAG8):
                 var key = kt + fcol + s
                 if key <= kmax:
-                    bk[s] = kp[(key * HKV + kvh) * HEAD_DIM + kd]
+                    bk[s] = kp[(key * HKV + kvh) * HEAD_DIM + kd].cast[DType.float32]()
             sfrag = _mma8x8(afrag[dt], bk, sfrag)
 
         sfrag *= scale
@@ -2939,7 +2945,7 @@ def tc_attn_kernel[
             comptime for s in range(_FRAG8):
                 bv[s] = vp[
                     (key_a * HKV + kvh) * HEAD_DIM + dt * _MMA8 + fcol + s
-                ]
+                ].cast[DType.float32]()
             ofrag[dt] = _mma8x8(pfrag, bv, ofrag[dt])
 
         m = m_new
