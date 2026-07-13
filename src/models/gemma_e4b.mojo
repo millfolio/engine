@@ -28,6 +28,8 @@ from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
     BLOCK,
     DevBuf,
+    KVBuf,
+    KV_DTYPE,
     WBuf,
     QMat,
     qmat_bf16,
@@ -253,8 +255,8 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         ctx: DeviceContext,
         l: Int,
         mut h: DevBuf,
-        mut kcs: List[DevBuf],
-        mut vcs: List[DevBuf],
+        mut kcs: List[KVBuf],
+        mut vcs: List[KVBuf],
         Tq: Int,
         q_offset: Int,
         cache_len: Int,
@@ -731,8 +733,8 @@ def load_e4b_weights(
 def e4b_attn(
     ctx: DeviceContext,
     mut qkv: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     write: Bool,
     mut qnw: DevBuf,
     mut knw: DevBuf,
@@ -822,7 +824,7 @@ def e4b_attn(
         # K: per-head k_norm + RoPE → own cache rows.
         if l_full:
             comptime kk = rope_k_kernel[
-                type_of(qslay), EFU_HKV, EFU_HEAD_DIM, True
+                type_of(qslay), EFU_HKV, EFU_HEAD_DIM, True, KV_DTYPE
             ]
             cached_enqueue[kk](
                 ctx,
@@ -840,7 +842,7 @@ def e4b_attn(
             )
         else:
             comptime kk = rope_k_kernel[
-                type_of(qslay), ESL_HKV, ESL_HEAD_DIM, True
+                type_of(qslay), ESL_HKV, ESL_HEAD_DIM, True, KV_DTYPE
             ]
             cached_enqueue[kk](
                 ctx,
@@ -858,7 +860,7 @@ def e4b_attn(
             )
         # V: scale-free v_norm → own cache rows (mirror 12B: Gemma-4 norms V).
         if l_full:
-            comptime kv = vnorm_kernel[type_of(qslay), EFU_HKV, EFU_HEAD_DIM]
+            comptime kv = vnorm_kernel[type_of(qslay), EFU_HKV, EFU_HEAD_DIM, KV_DTYPE]
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
@@ -871,7 +873,7 @@ def e4b_attn(
                 block_dim=BLOCK,
             )
         else:
-            comptime kv = vnorm_kernel[type_of(qslay), ESL_HKV, ESL_HEAD_DIM]
+            comptime kv = vnorm_kernel[type_of(qslay), ESL_HKV, ESL_HEAD_DIM, KV_DTYPE]
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
@@ -888,7 +890,7 @@ def e4b_attn(
     var olay = row_major(Tq * q_dim)
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
-        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, EFU_HKV, EFU_HEAD_DIM]
+        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, EFU_HKV, EFU_HEAD_DIM, KV_DTYPE]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
@@ -903,7 +905,7 @@ def e4b_attn(
             block_dim=WARP_SIZE,
         )
     else:
-        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM]
+        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM, KV_DTYPE]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
@@ -928,8 +930,8 @@ def e4b_layer(
     mut w: GemmaE4bWeights,
     l: Int,
     mut h: DevBuf,
-    mut kcs: List[DevBuf],
-    mut vcs: List[DevBuf],
+    mut kcs: List[KVBuf],
+    mut vcs: List[KVBuf],
     Tq: Int,
     q_offset: Int,
     cache_len: Int,

@@ -2037,13 +2037,13 @@ def mul_scalar_kernel[
 
 
 def vnorm_kernel[
-    LT: TensorLayout, HKV: Int, HEAD_DIM: Int
+    LT: TensorLayout, HKV: Int, HEAD_DIM: Int, KV_DT: DType = DType.float32
 ](
     In: TileTensor[
         DType.float32, LT, MutAnyOrigin
     ],  # V source (row = in_stride, V at in_off)
     Vc: TileTensor[
-        DType.float32, LT, MutAnyOrigin
+        KV_DT, LT, MutAnyOrigin
     ],  # [max, HKV, HEAD_DIM] V cache
     Tq: Int,
     q_offset: Int,
@@ -2080,7 +2080,7 @@ def vnorm_kernel[
     var rrms = _head_rrms(In, inbase, HEAD_DIM)
     for d in range(HEAD_DIM):
         var v = rebind[Scalar[DType.float32]](In[inbase + d])
-        Vc[outbase + d] = rebind[Vc.ElementType](v * rrms)
+        Vc[outbase + d] = rebind[Vc.ElementType]((v * rrms).cast[KV_DT]())
 
 
 def copy_kernel[
@@ -2518,15 +2518,28 @@ def attn_cached_kernel[
     for j in range(lane, qpos + 1, WARP_SIZE):
         var kbase = (j * HKV + kvh) * HEAD_DIM
         var s = SIMD[DType.float32, VEC](0.0)
-        for c in range(NVEC):
-            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
+        comptime for c2 in range(NVEC // 2):
+            # 16-wide f16 K load = the same 32 bytes/load as the old f32 path
+            # (the loop is load-issue bound, so halving BYTES per load without
+            # halving LOADS was a measured regression), widened once.
+            var kw = Kc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            s += qreg[2 * c2] * kw.slice[VEC, offset=0]()
+            s += qreg[2 * c2 + 1] * kw.slice[VEC, offset=VEC]()
         var score = s.reduce_add() * scale
         var m_new = max(m, score)
         var corr = exp(m - m_new)
         var p = exp(score - m_new)
         l = l * corr + p
-        for c in range(NVEC):
-            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
+        comptime for c2 in range(NVEC // 2):
+            var vw = Vc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            accv[2 * c2] = accv[2 * c2] * corr + p * vw.slice[VEC, offset=0]()
+            accv[2 * c2 + 1] = accv[2 * c2 + 1] * corr + p * vw.slice[
+                VEC, offset=VEC
+            ]()
         m = m_new
 
     # Cross-lane merge: global max, rescale each lane's partials, then sum.
@@ -2631,15 +2644,28 @@ def attn_cached_rope_kernel[
     for j in range(lane, qpos + 1, WARP_SIZE):
         var kbase = (j * HKV + kvh) * HEAD_DIM
         var s = SIMD[DType.float32, VEC](0.0)
-        for c in range(NVEC):
-            s += qreg[c] * Kc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
+        comptime for c2 in range(NVEC // 2):
+            # 16-wide f16 K load = the same 32 bytes/load as the old f32 path
+            # (the loop is load-issue bound, so halving BYTES per load without
+            # halving LOADS was a measured regression), widened once.
+            var kw = Kc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            s += qreg[2 * c2] * kw.slice[VEC, offset=0]()
+            s += qreg[2 * c2 + 1] * kw.slice[VEC, offset=VEC]()
         var score = s.reduce_add() * scale
         var m_new = max(m, score)
         var corr = exp(m - m_new)
         var p = exp(score - m_new)
         l = l * corr + p
-        for c in range(NVEC):
-            accv[c] = accv[c] * corr + p * Vc.raw_load[VEC](kbase + c * VEC).cast[DType.float32]()
+        comptime for c2 in range(NVEC // 2):
+            var vw = Vc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            accv[2 * c2] = accv[2 * c2] * corr + p * vw.slice[VEC, offset=0]()
+            accv[2 * c2 + 1] = accv[2 * c2 + 1] * corr + p * vw.slice[
+                VEC, offset=VEC
+            ]()
         m = m_new
 
     var m_g = warp_max(m)

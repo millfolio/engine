@@ -34,6 +34,8 @@ from kernels import (
 from runtime.tensor_ops import (
     BLOCK,
     DevBuf,
+    KVBuf,
+    KV_DTYPE,
     WBuf,
     PBuf,
     QMat,
@@ -202,8 +204,8 @@ struct Weights(ModelWeights, Movable):
         ctx: DeviceContext,
         l: Int,
         mut h: DevBuf,
-        mut kcs: List[DevBuf],
-        mut vcs: List[DevBuf],
+        mut kcs: List[KVBuf],
+        mut vcs: List[KVBuf],
         Tq: Int,
         q_offset: Int,
         cache_len: Int,
@@ -637,7 +639,7 @@ def load_weights(
 def rope_k(
     ctx: DeviceContext,
     mut kin: DevBuf,
-    mut kc: DevBuf,
+    mut kc: KVBuf,
     mut knw: DevBuf,
     Tq: Int,
     q_offset: Int,
@@ -677,7 +679,7 @@ def rope_k(
     var lay = row_major(Tq * strd)
     var nlay = row_major(head_dim if arch >= 2 else 1)
     if arch >= 2:  # all Qwen3 (0.6B/8B/14B): 8 kv heads, head_dim 128, qk-norm
-        comptime k = rope_k_kernel[type_of(lay), 8, 128, True]
+        comptime k = rope_k_kernel[type_of(lay), 8, 128, True, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(kin, lay),
@@ -693,7 +695,7 @@ def rope_k(
             block_dim=BLOCK,
         )
     elif arch == 1:
-        comptime k = rope_k_kernel[type_of(lay), 2, 128, False]
+        comptime k = rope_k_kernel[type_of(lay), 2, 128, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(kin, lay),
@@ -709,7 +711,7 @@ def rope_k(
             block_dim=BLOCK,
         )
     else:
-        comptime k = rope_k_kernel[type_of(lay), 2, 64, False]
+        comptime k = rope_k_kernel[type_of(lay), 2, 64, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(kin, lay),
@@ -729,8 +731,8 @@ def rope_k(
 def rope_kv(
     ctx: DeviceContext,
     mut qkv: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     mut knw: DevBuf,
     Tq: Int,
     q_offset: Int,
@@ -768,7 +770,7 @@ def rope_kv(
     var lay = row_major(Tq * in_stride)
     var nlay = row_major(head_dim if arch >= 2 else 1)
     if arch >= 2:  # all Qwen3 (0.6B/8B/14B): 8 kv heads, head_dim 128, qk-norm
-        comptime k = rope_kv_kernel[type_of(lay), 8, 128, True]
+        comptime k = rope_kv_kernel[type_of(lay), 8, 128, True, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qkv, lay),
@@ -786,7 +788,7 @@ def rope_kv(
             block_dim=BLOCK,
         )
     elif arch == 1:
-        comptime k = rope_kv_kernel[type_of(lay), 2, 128, False]
+        comptime k = rope_kv_kernel[type_of(lay), 2, 128, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qkv, lay),
@@ -804,7 +806,7 @@ def rope_kv(
             block_dim=BLOCK,
         )
     else:
-        comptime k = rope_kv_kernel[type_of(lay), 2, 64, False]
+        comptime k = rope_kv_kernel[type_of(lay), 2, 64, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qkv, lay),
@@ -826,8 +828,8 @@ def rope_kv(
 def attn_cached(
     ctx: DeviceContext,
     mut q: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     mut qnw: DevBuf,
     Tq: Int,
     q_offset: Int,
@@ -884,7 +886,7 @@ def attn_cached(
     if Tq == 1 and not flash_decode:
         var gd = ceildiv(Tq * hq * WARP_SIZE, BLOCK)
         if arch == 2:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 16, 8, 128, True]
+            comptime k = attn_cached_rope_kernel[type_of(lay), 16, 8, 128, True, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -900,7 +902,7 @@ def attn_cached(
                 block_dim=BLOCK,
             )
         elif arch == 3:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 32, 8, 128, True]
+            comptime k = attn_cached_rope_kernel[type_of(lay), 32, 8, 128, True, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -916,7 +918,7 @@ def attn_cached(
                 block_dim=BLOCK,
             )
         elif arch == 4:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 40, 8, 128, True]
+            comptime k = attn_cached_rope_kernel[type_of(lay), 40, 8, 128, True, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -933,7 +935,7 @@ def attn_cached(
             )
         elif arch == 1:
             comptime k = attn_cached_rope_kernel[
-                type_of(lay), 16, 2, 128, False
+                type_of(lay), 16, 2, 128, False, KV_DTYPE
             ]
             cached_enqueue[k](
                 ctx,
@@ -950,7 +952,7 @@ def attn_cached(
                 block_dim=BLOCK,
             )
         else:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 14, 2, 64, False]
+            comptime k = attn_cached_rope_kernel[type_of(lay), 14, 2, 64, False, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -1055,7 +1057,7 @@ def attn_cached(
         # 0.5B long context: stream K/V through shared memory (bit-identical, no cliff).
         # Flash is 0.5B-only: HEAD_DIM=128 would double the staged tile to ~32 KB
         # (Metal threadgroup limit), so 3B always uses attn_cached_kernel.
-        comptime kf = flash_attn_kernel[type_of(lay), 14, 2, 64, FLASH_PW]
+        comptime kf = flash_attn_kernel[type_of(lay), 14, 2, 64, FLASH_PW, KV_DTYPE]
         comptime nwarp = FLASH_PW * 7  # GROUP = 14/2
         cached_enqueue[kf](
             ctx,
@@ -1074,7 +1076,7 @@ def attn_cached(
         # (bit-exact). Grid = ceildiv(Tq,8)·HQ blocks, one warp (32 lanes) each.
         var grid = ceildiv(Tq, 8) * hq
         if arch == 2:
-            comptime k = tc_attn_kernel[type_of(lay), 16, 8, 128]
+            comptime k = tc_attn_kernel[type_of(lay), 16, 8, 128, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(qr, row_major(Tq * q_dim)),
@@ -1089,7 +1091,7 @@ def attn_cached(
                 block_dim=WARP_SIZE,
             )
         elif arch == 3:
-            comptime k = tc_attn_kernel[type_of(lay), 32, 8, 128]
+            comptime k = tc_attn_kernel[type_of(lay), 32, 8, 128, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(qr, row_major(Tq * q_dim)),
@@ -1104,7 +1106,7 @@ def attn_cached(
                 block_dim=WARP_SIZE,
             )
         elif arch == 4:
-            comptime k = tc_attn_kernel[type_of(lay), 40, 8, 128]
+            comptime k = tc_attn_kernel[type_of(lay), 40, 8, 128, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(qr, row_major(Tq * q_dim)),
@@ -1119,7 +1121,7 @@ def attn_cached(
                 block_dim=WARP_SIZE,
             )
         elif arch == 1:
-            comptime k = tc_attn_kernel[type_of(lay), 16, 2, 128]
+            comptime k = tc_attn_kernel[type_of(lay), 16, 2, 128, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(qr, row_major(Tq * q_dim)),
@@ -1134,7 +1136,7 @@ def attn_cached(
                 block_dim=WARP_SIZE,
             )
         else:
-            comptime k = tc_attn_kernel[type_of(lay), 14, 2, 64]
+            comptime k = tc_attn_kernel[type_of(lay), 14, 2, 64, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(qr, row_major(Tq * q_dim)),
@@ -1150,7 +1152,7 @@ def attn_cached(
             )
     elif arch == 2:
         # DECODE (Tq=1): warp-per-(query,head), keys split across the 32 lanes.
-        comptime k = attn_cached_kernel[type_of(lay), 16, 8, 128]
+        comptime k = attn_cached_kernel[type_of(lay), 16, 8, 128, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qr, row_major(Tq * q_dim)),
@@ -1163,7 +1165,7 @@ def attn_cached(
             block_dim=BLOCK,
         )
     elif arch == 3:
-        comptime k = attn_cached_kernel[type_of(lay), 32, 8, 128]
+        comptime k = attn_cached_kernel[type_of(lay), 32, 8, 128, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qr, row_major(Tq * q_dim)),
@@ -1176,7 +1178,7 @@ def attn_cached(
             block_dim=BLOCK,
         )
     elif arch == 4:
-        comptime k = attn_cached_kernel[type_of(lay), 40, 8, 128]
+        comptime k = attn_cached_kernel[type_of(lay), 40, 8, 128, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qr, row_major(Tq * q_dim)),
@@ -1189,7 +1191,7 @@ def attn_cached(
             block_dim=BLOCK,
         )
     elif arch == 1:
-        comptime k = attn_cached_kernel[type_of(lay), 16, 2, 128]
+        comptime k = attn_cached_kernel[type_of(lay), 16, 2, 128, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qr, row_major(Tq * q_dim)),
@@ -1202,7 +1204,7 @@ def attn_cached(
             block_dim=BLOCK,
         )
     else:
-        comptime k = attn_cached_kernel[type_of(lay), 14, 2, 64]
+        comptime k = attn_cached_kernel[type_of(lay), 14, 2, 64, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(qr, row_major(Tq * q_dim)),
@@ -1225,8 +1227,8 @@ def qwen_layer(
     mut w: Weights,
     l: Int,
     mut h: DevBuf,
-    mut kc: DevBuf,
-    mut vc: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
     Tq: Int,
     q_offset: Int,
     cache_len: Int,

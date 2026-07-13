@@ -65,6 +65,15 @@ comptime WBuf = DeviceBuffer[
     DType.uint16
 ]  # bf16 weights kept on-device as raw u16
 """A u16 device buffer holding raw bf16 weights (widened per element)."""
+comptime KV_DTYPE = DType.float32
+"""THE KV-cache dtype switch — KVBuf and every KV-kernel instantiation follow it.
+f16 was MEASURED AND REVERTED (2026-07-13, M4): decode attention is scan-latency
+bound, not bandwidth bound (KV is ~4% of decode traffic at 1570 ctx), so f16 cost
+more in widen-casts than it saved in bytes — long-code decode 15.4 -> 12.2 tok/s.
+Prefill LIKED it (tc_attn 5.65 -> 5.17 s), so revisit if the caches ever split."""
+comptime KVBuf = DeviceBuffer[KV_DTYPE]
+"""An f16 device buffer — the KV-cache type (half the attention bandwidth
+and half the resident bytes of f32; MLX ships f16 KV as default)."""
 comptime PBuf = DeviceBuffer[
     DType.uint32
 ]  # packed group-128 int4 weights (8 nibbles/word)

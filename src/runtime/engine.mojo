@@ -9,7 +9,7 @@ from std.time import perf_counter_ns
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
-from runtime.tensor_ops import DevBuf
+from runtime.tensor_ops import DevBuf, KVBuf, KV_DTYPE
 from runtime.sampling import process_logits, sample, argmax_f
 from runtime.model_iface import ModelWeights
 
@@ -99,10 +99,10 @@ struct Session(Movable):
     prompt and returns the last-position logits; `step` advances one token. Shared
     by greedy/sampled generate and the server's streaming loop."""
 
-    var kcs: List[DevBuf]
-    """Per-layer key caches (one f32 device buffer per decoder layer)."""
-    var vcs: List[DevBuf]
-    """Per-layer value caches (one f32 device buffer per decoder layer)."""
+    var kcs: List[KVBuf]
+    """Per-layer key caches (one f16 device buffer per decoder layer)."""
+    var vcs: List[KVBuf]
+    """Per-layer value caches (one f16 device buffer per decoder layer)."""
     var dummy: DevBuf
     """A size-1 scratch buffer passed to kernels needing an unused output slot."""
     var cache_len: Int
@@ -130,11 +130,11 @@ def new_session(
         On device/compute errors.
     """
     var cache_len = max_seq * nkv
-    var kcs = List[DevBuf]()
-    var vcs = List[DevBuf]()
+    var kcs = List[KVBuf]()
+    var vcs = List[KVBuf]()
     for _ in range(nlayers):
-        kcs.append(ctx.enqueue_create_buffer[DType.float32](cache_len))
-        vcs.append(ctx.enqueue_create_buffer[DType.float32](cache_len))
+        kcs.append(ctx.enqueue_create_buffer[KV_DTYPE](cache_len))
+        vcs.append(ctx.enqueue_create_buffer[KV_DTYPE](cache_len))
     return Session(
         kcs^, vcs^, ctx.enqueue_create_buffer[DType.float32](1), cache_len, 0
     )

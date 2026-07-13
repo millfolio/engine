@@ -29,6 +29,7 @@ from std.gpu.host import DeviceContext, DeviceBuffer
 from std.memory import memcpy
 
 comptime DevBuf = DeviceBuffer[DType.float32]
+comptime KVBuf = DeviceBuffer[DType.float32]  # mirror of tensor_ops.KV_DTYPE
 """A device-side f32 buffer (one layer's K or V slab)."""
 comptime FNV_OFFSET = UInt64(14695981039346656037)
 """FNV-1a 64-bit offset basis (initial hash value)."""
@@ -107,7 +108,7 @@ struct BlockCache(Movable):
         self.B = B
         self.nkv = nkv
         self.nlayers = nlayers
-        var blk_bytes = B * 4 + nlayers * 2 * B * nkv * 4
+        var blk_bytes = B * 4 + nlayers * 2 * B * nkv * 4  # id header (i32) + f32 KV
         self.max_blocks = budget_bytes // blk_bytes
         self.enabled = True
         self.order = List[String]()
@@ -229,8 +230,8 @@ struct BlockCache(Movable):
 
     def store_blocks(
         self,
-        mut kcs: List[DevBuf],
-        mut vcs: List[DevBuf],
+        mut kcs: List[KVBuf],
+        mut vcs: List[KVBuf],
         hashes: List[UInt64],
         ids: List[Int],
         a: Int,
@@ -251,7 +252,7 @@ struct BlockCache(Movable):
         """
         if not self.enabled:
             return
-        var slice_f = self.B * self.nkv  # floats per (block, layer) slice
+        var slice_f = self.B * self.nkv  # elements per (block, layer) slice (f16 = 2 bytes)
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "w") as f:
                 self._write_ids(f, ids, bi * self.B)
@@ -277,8 +278,8 @@ struct BlockCache(Movable):
 
     def restore_blocks(
         self,
-        mut kcs: List[DevBuf],
-        mut vcs: List[DevBuf],
+        mut kcs: List[KVBuf],
+        mut vcs: List[KVBuf],
         hashes: List[UInt64],
         a: Int,
         b: Int,
