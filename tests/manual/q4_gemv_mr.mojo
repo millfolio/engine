@@ -282,6 +282,69 @@ def matmul_q4_mrw_kernel[
         Y[n0 + lane] = rebind[Y.ElementType](total)
 
 
+
+def matmul_q4_qmv_kernel[
+    LT: TensorLayout
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """MLX-qmv-shaped decode GEMV (studied from mlx qmv_fast, MIT): 2 simdgroups
+    x 4 rows per threadgroup, NO K-split — each simdgroup sweeps full K for its
+    4 rows. Per thread a CONTIGUOUS 16-value K-slice (2 u32/row/iter) loaded
+    once into registers and reused rows-inner, plus the sum(x) trick for our
+    symmetric scheme: (nib-8)*s dot = s*(sum(nib*x) - 8*sum(x)) — nibbles stay
+    unsigned in the loop, the -8 folds once per group. 16 | 128 so one scale
+    per thread-iteration. Per-lane K-tail guards are plain loads/ALU (no
+    divergence around SIMD-group ops)."""
+    comptime assert X.flat_rank == 1
+    comptime RPS = 4  # rows per simdgroup
+    comptime VPT = 16  # contiguous K-values per thread per iteration
+    var sg = Int(thread_idx.x) // WARP_SIZE
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var n0 = Int(block_idx.x) * (2 * RPS) + sg * RPS
+    if n0 >= N:
+        return
+    var words = K // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var sp = S.ptr
+    var res = InlineArray[Float32, RPS](fill=0.0)
+    var kbase = lane * VPT
+    comptime BLK = 32 * VPT  # K consumed per iteration (512)
+    while kbase < K:
+        # x slice (16 f32) once into registers + its sum
+        var x0 = (xp + kbase).load[width=8]()
+        var x1 = (xp + kbase + 8).load[width=8]()
+        var sumx = x0.reduce_add() + x1.reduce_add()
+        var g = kbase >> Q4_SHIFT  # one 128-group covers the 16 values
+        var wq = kbase // 8
+        comptime for r in range(RPS):
+            if n0 + r < N:  # warp-uniform
+                var w2 = (pp + (n0 + r) * words + wq).load[width=2]()
+                var qd = Float32(0.0)
+                comptime for j in range(2):
+                    var nibs = (SIMD[DType.uint32, 8](w2[j]) >> _Q4_SHIFTS) & 0xF
+                    var qf = nibs.cast[DType.float32]()
+                    qd += (qf * (x0 if j == 0 else x1)).reduce_add()
+                var s = rebind[Float32](sp[(n0 + r) * NG + g])
+                res[r] += s * (qd - 8.0 * sumx)
+        kbase += BLK
+    comptime for r in range(RPS):
+        var total = warp_sum(res[r])
+        if lane == 0 and n0 + r < N:
+            if use_bias != 0:
+                total += rebind[Scalar[DType.float32]](B[n0 + r])
+            Y[n0 + r] = rebind[Y.ElementType](total)
+
+
 # ── host helpers (same idioms as q4_kernels.mojo) ────────────────────────────
 
 
@@ -402,6 +465,13 @@ def check[
             xt, pt, st, bt, yt, K, N, NG, 1,
             grid_dim=ceildiv(warps * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
+        )
+    elif MRW == 2:  # qmv-shaped (2 simdgroups × 4 rows, contiguous slices)
+        comptime kq2 = matmul_q4_qmv_kernel[type_of(row_major(1))]
+        ctx.enqueue_function[kq2](
+            xt, pt, st, bt, yt, K, N, NG, 1,
+            grid_dim=ceildiv(N, 8),
+            block_dim=2 * WARP_SIZE,
         )
     elif MRW != 0:  # composed: R rows per warp × W K-slices
         comptime k = matmul_q4_mrw_kernel[type_of(row_major(1)), R, W]
@@ -537,6 +607,28 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
             sep="",
         )
 
+    comptime kqmv = matmul_q4_qmv_kernel[type_of(row_major(1))]
+    var gq = ceildiv(N, 8)
+    for _ in range(5):
+        ctx.enqueue_function[kqmv](
+            xt, pt, st, bt, yt, K, N, NG, 0,
+            grid_dim=gq, block_dim=2 * WARP_SIZE,
+        )
+    ctx.synchronize()
+    var tq = perf_counter_ns()
+    for _ in range(iters):
+        ctx.enqueue_function[kqmv](
+            xt, pt, st, bt, yt, K, N, NG, 0,
+            grid_dim=gq, block_dim=2 * WARP_SIZE,
+        )
+    ctx.synchronize()
+    var msq = Float64(perf_counter_ns() - tq) / Float64(iters) / 1.0e6
+    print(
+        "            qmv 2x4     ", msq, " ms  ",
+        wbytes / (msq * 1.0e6), " GB/s  (", ship_ms / msq, "x ship)",
+        sep="",
+    )
+
     comptime for cfg in [(2, 2), (2, 4), (4, 2), (4, 4), (8, 2)]:
         comptime RR = cfg[0]
         comptime WW = cfg[1]
@@ -583,6 +675,9 @@ def main() raises:
     check[2, 4, 1](ctx, 512, 257)
     check[4, 2, 1](ctx, 2048, 511)
     check[4, 4, 1](ctx, 2048, 513)
+    check[1, 1, 2](ctx, 2176, 257)
+    check[1, 1, 2](ctx, 2048, 511)
+    check[1, 1, 2](ctx, 512, 130)
     print("bench (Qwen2.5-3B decode shapes; weight-GB/s, 200 iters):")
     bench(ctx, 2048, 2048)    # q/o proj
     bench(ctx, 2048, 256)     # kv proj (tiny N)
