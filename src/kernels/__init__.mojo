@@ -1022,6 +1022,181 @@ def matmul_q4_norm_kernel[
         Y[m * N + n] = rebind[Y.ElementType](total)
 
 
+def matmul_q4_norm_rw_kernel[
+    LT: TensorLayout, R: Int, W: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    LNW: TileTensor[DType.float32, LT, MutAnyOrigin],  # RMSNorm weight [K]
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """`matmul_q4_norm_kernel` in the K-split shape (M=1): R rows × W K-slice
+    warps per threadgroup (see matmul_q4_rw_kernel for why — decode's qkv and
+    the merged gate_up run through the norm-fused GEMV, and gate_up's
+    2048→2·11008 is exactly the shape where K-splitting measured 1.79×).
+    The RMS sum-of-squares is row-independent, so each K-slice's partial ss is
+    folded across warps alongside the R per-row dot partials; warps with r>0
+    compute the same slice ss and simply don't store it.
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        R: Rows per threadgroup.
+        W: K-slice warps per row.
+
+    Args:
+        X: Input activations [1, K] (f32), un-normalized.
+        LNW: RMSNorm weight [K] (f32), applied to X inside the dot.
+        P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
+        S: Per-group f32 scales [N, NG].
+        B: Bias [N] (f32), added when use_bias != 0.
+        Y: Output [1, N] (f32).
+        K: Contraction (input) dimension.
+        N: Number of output channels.
+        NG: Groups per row (K / Q4_GROUP).
+        use_bias: Add B when nonzero.
+    """
+    comptime assert X.flat_rank == 1
+    var n0 = Int(block_idx.x) * R
+    var wid = Int(thread_idx.x) // WARP_SIZE
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var r = wid % R
+    var w = wid // R
+    var n = n0 + r
+    var words = K // 8
+    var octs = words // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var lwp = LNW.ptr
+    var sp = S.ptr
+    var part = stack_allocation[
+        R * W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var ssp = stack_allocation[
+        W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var acc = Float32(0.0)
+    var ss = Float32(0.0)
+    if n < N:  # warp-uniform (n0, r are per-warp constants)
+        for q in range(w * WARP_SIZE + lane, octs, W * WARP_SIZE):
+            var word8 = (pp + n * words + q * 8).load[width=8]()
+            var k0 = q * 64
+            var s = sp[n * NG + (k0 >> Q4_SHIFT)]
+            var racc = Float32(0.0)
+            comptime for j in range(8):
+                var nibs = (SIMD[DType.uint32, 8](word8[j]) >> _Q4_SHIFTS) & 0xF
+                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]()
+                var xv = (xp + k0 + j * 8).load[width=8]()
+                var lw = (lwp + k0 + j * 8).load[width=8]()
+                ss += (xv * xv).reduce_add()
+                racc += (qf * (xv * lw)).reduce_add()
+            acc += racc * rebind[Float32](s)
+    var pa = warp_sum(acc)
+    var ps = warp_sum(ss)
+    if lane == 0:
+        part[r * W + w] = pa
+        if r == 0:
+            ssp[w] = ps
+    barrier()
+    if wid == 0 and lane < R and n0 + lane < N:
+        var sstot = Float32(0.0)
+        comptime for i in range(W):
+            sstot += ssp[i]
+        var rms = sqrt(sstot / Float32(K) + EPS)
+        var total = Float32(0.0)
+        comptime for i in range(W):
+            total += part[lane * W + i]
+        total /= rms
+        if use_bias != 0:
+            total += rebind[Scalar[DType.float32]](B[n0 + lane])
+        Y[n0 + lane] = rebind[Y.ElementType](total)
+
+
+def matmul_q4_resid_rw_kernel[
+    LT: TensorLayout, R: Int, W: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    RS: TileTensor[
+        DType.float32, LT, MutAnyOrigin
+    ],  # residual added in the epilogue
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """`matmul_q4_resid_kernel` in the K-split shape (M=1) — the o-proj is a
+    square 2048×2048, the shape class where one-warp-per-output is pure
+    latency (measured 1.37× from K-splitting). Same body as
+    matmul_q4_rw_kernel plus the residual add in the store.
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        R: Rows per threadgroup.
+        W: K-slice warps per row.
+
+    Args:
+        X: Input activations [1, K] (f32).
+        P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
+        S: Per-group f32 scales [N, NG].
+        B: Bias [N] (f32), added when use_bias != 0.
+        RS: Residual [1, N] (f32), added in the epilogue.
+        Y: Output [1, N] (f32) = X·Wᵀ (+bias) + RS.
+        K: Contraction (input) dimension.
+        N: Number of output channels.
+        NG: Groups per row (K / Q4_GROUP).
+        use_bias: Add B when nonzero.
+    """
+    comptime assert X.flat_rank == 1
+    var n0 = Int(block_idx.x) * R
+    var wid = Int(thread_idx.x) // WARP_SIZE
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var r = wid % R
+    var w = wid // R
+    var n = n0 + r
+    var words = K // 8
+    var octs = words // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var sp = S.ptr
+    var part = stack_allocation[
+        R * W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var acc = Float32(0.0)
+    if n < N:  # warp-uniform
+        for q in range(w * WARP_SIZE + lane, octs, W * WARP_SIZE):
+            var word8 = (pp + n * words + q * 8).load[width=8]()
+            var k0 = q * 64
+            var s = sp[n * NG + (k0 >> Q4_SHIFT)]
+            var racc = Float32(0.0)
+            comptime for j in range(8):
+                var nibs = (SIMD[DType.uint32, 8](word8[j]) >> _Q4_SHIFTS) & 0xF
+                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]()
+                var xv = (xp + k0 + j * 8).load[width=8]()
+                racc += (qf * xv).reduce_add()
+            acc += racc * rebind[Float32](s)
+    var p = warp_sum(acc)
+    if lane == 0:
+        part[r * W + w] = p
+    barrier()
+    if wid == 0 and lane < R and n0 + lane < N:
+        var total = Float32(0.0)
+        comptime for i in range(W):
+            total += part[lane * W + i]
+        if use_bias != 0:
+            total += rebind[Scalar[DType.float32]](B[n0 + lane])
+        total += rebind[Scalar[DType.float32]](RS[n0 + lane])
+        Y[n0 + lane] = rebind[Y.ElementType](total)
+
+
 def matmul_q4_resid_kernel[
     LT: TensorLayout
 ](
