@@ -2679,6 +2679,166 @@ def attn_cached_rope_kernel[
                 O[obase + c * VEC + e] = rebind[O.ElementType](a / l_g)
 
 
+def attn_cached_rope_kw_kernel[
+    LT: TensorLayout,
+    HQ: Int,
+    HKV: Int,
+    HEAD_DIM: Int,
+    QK_NORM: Bool = False,
+    W: Int = 4,
+    KV_DT: DType = DType.float32,
+](
+    Q: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Kc: TileTensor[KV_DT, LT, MutAnyOrigin],
+    Vc: TileTensor[KV_DT, LT, MutAnyOrigin],
+    Qn: TileTensor[DType.float32, LT, MutAnyOrigin],
+    O: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Tq: Int,
+    q_offset: Int,
+    q_stride: Int,
+    q_off: Int,
+):
+    """`attn_cached_rope_kernel` with the key scan K-SPLIT across W warps — the
+    same starved-parallelism fix as the GEMV rw kernel, applied to attention.
+    One threadgroup per (query, head); each of its W warps runs the flash scan
+    over a disjoint key comb (j = w·32+lane, stride W·32), does the existing
+    cross-LANE merge, then the W per-warp partials (m, l, acc[HEAD_DIM]) meet
+    in threadgroup memory for a cross-WARP flash merge by warp 0. Each warp
+    redundantly loads+rotates the same Q (cheap: HEAD_DIM work vs the key
+    scan). Motivation: at 1570-ctx decode the old kernel gave each (query,
+    head) only 32 lanes → ~50 SEQUENTIAL flash steps per lane; long-context
+    attention is scan-latency bound (measured — f16 KV made it slower), so
+    more warps per query is the lever, not fewer bytes.
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        HQ: Number of query heads.
+        HKV: Number of key/value heads.
+        HEAD_DIM: Per-head dimension.
+        QK_NORM: Whether to apply per-head Q-RMSNorm before RoPE (Qwen3).
+        W: Key-scan warps per (query, head).
+        KV_DT: KV-cache element dtype.
+
+    Args:
+        Q: RAW (un-rotated) Q slice (f32); rows of stride q_stride, Q at q_off.
+        Kc: RoPE-rotated K cache [max, HKV, HEAD_DIM], row = absolute position.
+        Vc: V cache [max, HKV, HEAD_DIM].
+        Qn: Q_norm weight [HEAD_DIM] (f32); used only when QK_NORM.
+        O: Attention output [Tq, HQ, HEAD_DIM] (f32).
+        Tq: Number of query tokens.
+        q_offset: Absolute position of the first query.
+        q_stride: Source row stride of Q.
+        q_off: Column offset of Q within the source row.
+    """
+    comptime assert Q.flat_rank == 1
+    comptime VEC = 8
+    comptime NVEC = HEAD_DIM // VEC
+    comptime HALFC = NVEC // 2
+    comptime GROUP = HQ // HKV
+    var qh = Int(block_idx.x)  # one threadgroup per (query, head)
+    var w = Int(thread_idx.x) // WARP_SIZE
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var h = qh % HQ
+    var t = qh // HQ
+    if t >= Tq:
+        return
+    var kvh = h // GROUP
+    var qpos = q_offset + t
+    var qbase = t * q_stride + q_off + h * HEAD_DIM
+    var scale = 1.0 / sqrt(Float32(HEAD_DIM))
+
+    # Every warp loads + rotates the same Q (identical math, no sync needed).
+    var qreg = InlineArray[SIMD[DType.float32, VEC], NVEC](fill=0.0)
+    for c in range(NVEC):
+        qreg[c] = Q.raw_load[VEC](qbase + c * VEC)
+    var rrms = Float32(1.0)
+    comptime if QK_NORM:
+        rrms = _head_rrms(Q, qbase, HEAD_DIM)
+    comptime HALF = HEAD_DIM // 2
+    for c in range(HALFC):
+        var lo = qreg[c]
+        var hi = qreg[c + HALFC]
+        comptime if QK_NORM:
+            lo = lo * rrms * Qn.raw_load[VEC](c * VEC)
+            hi = hi * rrms * Qn.raw_load[VEC](c * VEC + HALF)
+        var ang = SIMD[DType.float32, VEC](0.0)
+        for e in range(VEC):
+            var d = c * VEC + e
+            var freq = exp(
+                -(2.0 * Float32(d) / Float32(HEAD_DIM)) * log(THETA)
+            )
+            ang[e] = Float32(qpos) * freq
+        var cosv = cos(ang)
+        var sinv = sin(ang)
+        qreg[c] = lo * cosv - hi * sinv
+        qreg[c + HALFC] = hi * cosv + lo * sinv
+
+    # This warp's comb of keys: j = w*32+lane, stride W*32.
+    var m = Float32(-1.0e30)
+    var l = Float32(0.0)
+    var accv = InlineArray[SIMD[DType.float32, VEC], NVEC](fill=0.0)
+    for j in range(w * WARP_SIZE + lane, qpos + 1, W * WARP_SIZE):
+        var kbase = (j * HKV + kvh) * HEAD_DIM
+        var s = SIMD[DType.float32, VEC](0.0)
+        comptime for c2 in range(NVEC // 2):
+            var kw = Kc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            s += qreg[2 * c2] * kw.slice[VEC, offset=0]()
+            s += qreg[2 * c2 + 1] * kw.slice[VEC, offset=VEC]()
+        var score = s.reduce_add() * scale
+        var m_new = max(m, score)
+        var corr = exp(m - m_new)
+        var p = exp(score - m_new)
+        l = l * corr + p
+        comptime for c2 in range(NVEC // 2):
+            var vw = Vc.raw_load[2 * VEC](kbase + c2 * 2 * VEC).cast[
+                DType.float32
+            ]()
+            accv[2 * c2] = accv[2 * c2] * corr + p * vw.slice[VEC, offset=0]()
+            accv[2 * c2 + 1] = accv[2 * c2 + 1] * corr + p * vw.slice[
+                VEC, offset=VEC
+            ]()
+        m = m_new
+
+    # Tier 1: the existing cross-lane merge → one (m, l, acc) per warp.
+    var m_w = warp_max(m)
+    var f = exp(m - m_w)
+    var l_w = warp_sum(l * f)
+    # Tier 2: per-warp partials meet in threadgroup memory.
+    var sm = stack_allocation[
+        W * (HEAD_DIM + 2), Float32, address_space = AddressSpace.SHARED
+    ]()
+    for c in range(NVEC):
+        for e in range(VEC):
+            var a = warp_sum(accv[c][e] * f)
+            if lane == 0:
+                sm[w * (HEAD_DIM + 2) + c * VEC + e] = a
+    if lane == 0:
+        sm[w * (HEAD_DIM + 2) + HEAD_DIM] = m_w
+        sm[w * (HEAD_DIM + 2) + HEAD_DIM + 1] = l_w
+    barrier()
+    if w == 0:
+        # Global flash merge over the W partials (empty combs have l=0 and
+        # m=-1e30, so their weight collapses to zero — no special-casing).
+        var m_g = Float32(-1.0e30)
+        comptime for i in range(W):
+            m_g = max(m_g, sm[i * (HEAD_DIM + 2) + HEAD_DIM])
+        var l_g = Float32(0.0)
+        comptime for i in range(W):
+            l_g += sm[i * (HEAD_DIM + 2) + HEAD_DIM + 1] * exp(
+                sm[i * (HEAD_DIM + 2) + HEAD_DIM] - m_g
+            )
+        var obase = (t * HQ + h) * HEAD_DIM
+        for d in range(lane, HEAD_DIM, WARP_SIZE):
+            var a = Float32(0.0)
+            comptime for i in range(W):
+                a += sm[i * (HEAD_DIM + 2) + d] * exp(
+                    sm[i * (HEAD_DIM + 2) + HEAD_DIM] - m_g
+                )
+            O[obase + d] = rebind[O.ElementType](a / l_g)
+
+
 comptime FLASH_BK = WARP_SIZE  # flash keys per tile = one per lane
 """Flash-attention keys per tile: one per lane (= WARP_SIZE)."""
 

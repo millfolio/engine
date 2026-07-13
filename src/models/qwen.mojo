@@ -21,6 +21,7 @@ from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
 from kernels import (
+    attn_cached_rope_kw_kernel,
     rope_k_kernel,
     rope_kv_kernel,
     rope_q_kernel,
@@ -105,10 +106,12 @@ struct Weights(ModelWeights, Movable):
 
     var embed: WBuf  # bf16 — the input embedding table
     """Input embedding table (bf16)."""
-    var lm_head: WBuf  # bf16 — the output LM head. A 2nd copy of `embed` for
-    # tied models (0.5B/3B/0.6B); the separate lm_head.weight
+    var lm_head: QMat  # int4 when q4 (group-128, like the projections) — the
+    # LM head reads 622 MB/token at bf16 on the 3B (~9 ms measured, the single
+    # largest non-layer cost); quantized it streams ~156 MB through the K-split
+    # GEMV. A 2nd copy of `embed` for tied models; the separate lm_head.weight
     # for untied Qwen3 chat models (8B/14B).
-    """Output LM head (bf16); a 2nd copy of `embed` for tied models (0.5B/3B/0.6B), the separate `lm_head.weight` for untied Qwen3 chat models."""
+    """Output LM head (QMat: int4 when q4, else bf16); a 2nd copy of `embed` for tied models (0.5B/3B/0.6B), the separate `lm_head.weight` for untied Qwen3 chat models."""
     var final_norm: DevBuf
     """Final RMSNorm weight."""
     var ln1: List[DevBuf]
@@ -253,7 +256,7 @@ struct Weights(ModelWeights, Movable):
         """
         # Final RMSNorm + tied LM head over the last row (Qwen: no final softcap).
         var hl = last_row(ctx, h, T, self.hidden)
-        var logits = mm_norm(
+        var logits = mm_w_norm(
             ctx,
             hl,
             self.final_norm,
@@ -291,7 +294,7 @@ struct Weights(ModelWeights, Movable):
         """
         # All-row logits for spec-decode verification (Qwen: no final softcap).
         var n = T * self.vocab
-        var logits = mm_norm(
+        var logits = mm_w_norm(
             ctx,
             h,
             self.final_norm,
@@ -333,7 +336,7 @@ struct Weights(ModelWeights, Movable):
         Raises:
             If the LM-head GEMV or gather dispatch fails.
         """
-        var logits = mm_norm(
+        var logits = mm_w_norm(
             ctx,
             h,
             self.final_norm,
@@ -458,12 +461,15 @@ def load_weights(
     var lm_head_name = pfx + "lm_head.weight"
     if lm_head_name not in name2idx:
         lm_head_name = String("lm_head.weight")
-    var lm_head: WBuf
+    var lm_head: QMat
     if lm_head_name in name2idx:
-        lm_head = load_named_bf16(ctx, paths, entries, name2idx, lm_head_name)
+        lm_head = load_proj(
+            ctx, paths, entries, name2idx, lm_head_name, hidden, q4
+        )
     else:
-        lm_head = load_named_bf16(
-            ctx, paths, entries, name2idx, pfx + "embed_tokens.weight"
+        lm_head = load_proj(
+            ctx, paths, entries, name2idx, pfx + "embed_tokens.weight",
+            hidden, q4,
         )
     var final_norm = load_named(
         ctx, paths, entries, name2idx, pfx + "norm.weight"
@@ -886,7 +892,7 @@ def attn_cached(
     if Tq == 1 and not flash_decode:
         var gd = ceildiv(Tq * hq * WARP_SIZE, BLOCK)
         if arch == 2:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 16, 8, 128, True, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 16, 8, 128, True, 4, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -898,11 +904,11 @@ def attn_cached(
                 q_offset,
                 qstr,
                 q_off,
-                grid_dim=gd,
-                block_dim=BLOCK,
+                grid_dim=Tq * 16,
+                block_dim=4 * WARP_SIZE,
             )
         elif arch == 3:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 32, 8, 128, True, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 32, 8, 128, True, 4, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -914,11 +920,11 @@ def attn_cached(
                 q_offset,
                 qstr,
                 q_off,
-                grid_dim=gd,
-                block_dim=BLOCK,
+                grid_dim=Tq * 32,
+                block_dim=4 * WARP_SIZE,
             )
         elif arch == 4:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 40, 8, 128, True, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 40, 8, 128, True, 4, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -930,12 +936,12 @@ def attn_cached(
                 q_offset,
                 qstr,
                 q_off,
-                grid_dim=gd,
-                block_dim=BLOCK,
+                grid_dim=Tq * 40,
+                block_dim=4 * WARP_SIZE,
             )
         elif arch == 1:
-            comptime k = attn_cached_rope_kernel[
-                type_of(lay), 16, 2, 128, False, KV_DTYPE
+            comptime k = attn_cached_rope_kw_kernel[
+                type_of(lay), 16, 2, 128, False, 4, KV_DTYPE
             ]
             cached_enqueue[k](
                 ctx,
@@ -948,11 +954,11 @@ def attn_cached(
                 q_offset,
                 qstr,
                 q_off,
-                grid_dim=gd,
-                block_dim=BLOCK,
+                grid_dim=Tq * 16,
+                block_dim=4 * WARP_SIZE,
             )
         else:
-            comptime k = attn_cached_rope_kernel[type_of(lay), 14, 2, 64, False, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 14, 2, 64, False, 4, KV_DTYPE]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -964,8 +970,8 @@ def attn_cached(
                 q_offset,
                 qstr,
                 q_off,
-                grid_dim=gd,
-                block_dim=BLOCK,
+                grid_dim=Tq * 14,
+                block_dim=4 * WARP_SIZE,
             )
         return o^
 
