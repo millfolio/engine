@@ -16,6 +16,7 @@ from kernels import (
     matmul_simd_kernel,
     matmul_tiled_kernel,
     matmul_q4_kernel,
+    matmul_q4_rw_kernel,
     matmul_q4_batch_kernel,
     matmul_q4_small_kernel,
     matmul_simd_q4_kernel,
@@ -264,22 +265,43 @@ def mm_w(
     var bt = TileTensor(b, row_major(N if use_bias != 0 else 1))
     var yt = TileTensor(y, lay)
     if M == 1:
-        comptime k = matmul_q4_kernel[type_of(lay)]
-        cached_enqueue[k](
-            ctx,
-            xt,
-            pt,
-            st,
-            bt,
-            yt,
-            M,
-            K,
-            N,
-            NG,
-            use_bias,
-            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+        # Shape-routed decode GEMV. The K-split kernel multiplies warps in
+        # flight per row, which is what short-K shapes starve for; long-K rows
+        # (down-proj) already saturate on the one-warp-per-output kernel and
+        # only lose from the extra reduction. Measured M4 (pixi run q4-gemv-mr):
+        # 2048×11008 51.9→92.9 GB/s (R=1 W=4); 2048×2048 1.37× (R=2 W=4);
+        # 11008×2048 stays on the shipping kernel (79.4 GB/s, best there).
+        if K <= 4096 and N >= 4096:
+            comptime kr = matmul_q4_rw_kernel[type_of(lay), 1, 4]
+            cached_enqueue[kr](
+                ctx, xt, pt, st, bt, yt, K, N, NG, use_bias,
+                grid_dim=N,
+                block_dim=4 * WARP_SIZE,
+            )
+        elif K <= 4096 and N >= 1024:
+            comptime kr2 = matmul_q4_rw_kernel[type_of(lay), 2, 4]
+            cached_enqueue[kr2](
+                ctx, xt, pt, st, bt, yt, K, N, NG, use_bias,
+                grid_dim=ceildiv(N, 2),
+                block_dim=8 * WARP_SIZE,
+            )
+        else:
+            comptime k = matmul_q4_kernel[type_of(lay)]
+            cached_enqueue[k](
+                ctx,
+                xt,
+                pt,
+                st,
+                bt,
+                yt,
+                M,
+                K,
+                N,
+                NG,
+                use_bias,
+                grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+                block_dim=BLOCK,
+            )
     elif M >= SPEC_SMALL_MIN and M <= SPEC_MAX_M and simd_ok:
         # Mid-small M (≈5..8, larger speculative verify): dedicated int4 GEMM with a
         # single 8-row MMA tile — MMA-efficient like the prefill GEMM but without

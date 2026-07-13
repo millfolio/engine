@@ -735,6 +735,89 @@ def matmul_q4_kernel[
         Y[m * N + n] = rebind[Y.ElementType](total)
 
 
+def matmul_q4_rw_kernel[
+    LT: TensorLayout, R: Int, W: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """Decode GEMV (M=1): R rows × W K-slice warps per threadgroup. Same inner
+    loop as `matmul_q4_kernel`, but each row's K sweep is split across W warps
+    (partials folded in threadgroup memory), multiplying warps in flight per
+    row. The shipping one-warp-per-output kernel is load-ISSUE limited on
+    short-K/large-N shapes — a warp covers K=2048 in ONE 256-bit load per lane
+    (2048×2048 measures 29 GB/s while 2048×11008 reaches 80 with the same
+    loop, purely from having more warps). Measured (M4, `pixi run
+    q4-gemv-mr`): R=1 W=4 → 92.9 GB/s on 2048×11008 (1.79×, 77% of ceiling);
+    R=2 W=4 → 1.37× on 2048×2048. Long-K shapes (e.g. 11008×2048) stay on the
+    shipping kernel — it already saturates there (mm_w routes by shape). Row
+    guards are warp-uniform (no per-lane divergence around SIMD ops — see the
+    divergent-branch miscompile note on the MMA kernels).
+
+    Parameters:
+        LT: Tensor layout type for the flat 1D buffers.
+        R: Rows per threadgroup.
+        W: K-slice warps per row.
+
+    Args:
+        X: Input activations [1, K] (f32).
+        P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
+        S: Per-group f32 scales [N, NG].
+        B: Bias [N] (f32), added when use_bias != 0.
+        Y: Output [1, N] (f32).
+        K: Contraction (input) dimension.
+        N: Number of output channels.
+        NG: Groups per row (K / Q4_GROUP).
+        use_bias: Add B when nonzero.
+    """
+    comptime assert X.flat_rank == 1
+    var n0 = Int(block_idx.x) * R
+    var wid = Int(thread_idx.x) // WARP_SIZE
+    var lane = Int(thread_idx.x) % WARP_SIZE
+    var r = wid % R
+    var w = wid // R
+    var n = n0 + r
+    var words = K // 8
+    var octs = words // 8
+    var pp = P.ptr
+    var xp = X.ptr
+    var sp = S.ptr
+    var part = stack_allocation[
+        R * W, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var acc = Float32(0.0)
+    if n < N:  # warp-uniform (n0, r are per-warp constants)
+        for q in range(w * WARP_SIZE + lane, octs, W * WARP_SIZE):
+            var k0 = q * 64
+            var word8 = (pp + n * words + q * 8).load[width=8]()
+            var s = sp[n * NG + (k0 >> Q4_SHIFT)]
+            var racc = Float32(0.0)
+            comptime for j in range(8):
+                var nibs = (SIMD[DType.uint32, 8](word8[j]) >> _Q4_SHIFTS) & 0xF
+                var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]()
+                var xv = (xp + k0 + j * 8).load[width=8]()
+                racc += (qf * xv).reduce_add()
+            acc += racc * rebind[Float32](s)
+    var p = warp_sum(acc)
+    if lane == 0:
+        part[r * W + w] = p
+    barrier()
+    if wid == 0 and lane < R and n0 + lane < N:
+        var total = Float32(0.0)
+        comptime for i in range(W):
+            total += part[lane * W + i]
+        if use_bias != 0:
+            total += rebind[Scalar[DType.float32]](B[n0 + lane])
+        Y[n0 + lane] = rebind[Y.ElementType](total)
+
+
 comptime SPEC_MAX_M = 8  # small-M int4 path cap. Above this the flat 64-row
 # simdgroup GEMM wins; mm_w routes M>SPEC_MAX_M there.
 """Max M routed to the small-M int4 paths; above it the 64-row simd GEMM wins."""
