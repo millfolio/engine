@@ -189,6 +189,133 @@ def matmul_simd_q4_f16_kernel[
                     Y[grow * N + gcol] = rebind[Y.ElementType](v)
 
 
+
+def matmul_simd_q4_bk_kernel[
+    LT: TensorLayout, BK: Int
+](
+    X: TileTensor[DType.float32, LT, MutAnyOrigin],
+    P: TileTensor[DType.uint32, LT, MutAnyOrigin],
+    S: TileTensor[DType.float32, LT, MutAnyOrigin],
+    B: TileTensor[DType.float32, LT, MutAnyOrigin],
+    Y: TileTensor[DType.float32, LT, MutAnyOrigin],
+    M: Int,
+    K: Int,
+    N: Int,
+    NG: Int,
+    use_bias: Int,
+):
+    """The shipping f32-MMA int4 GEMM with the K-block size a parameter: BK=32
+    (shipping) barriers 64x per K=2048 sweep; BK=64/128 halve/quarter the
+    barrier + staging-loop overhead per FLOP at 2x/4x the shared memory
+    (BK*64*4B: 8/16/32 KB — all fit)."""
+    comptime assert X.flat_rank == 1
+    var tid = Int(thread_idx.x)
+    var lane = tid % 32
+    var fl = _frag8_layout(lane)
+    var frow = fl[0]
+    var fcol = fl[1]
+    var sg = tid // 32
+    var blk_row = Int(block_idx.y) * SG_BM
+    var blk_col = Int(block_idx.x) * SG_BN
+    var row_base = blk_row + (sg // 2) * _SG_SGM
+    var col_base = blk_col + (sg % 2) * _SG_SGN
+    var Bs = stack_allocation[
+        BK * SG_BN, Float32, address_space = AddressSpace.SHARED
+    ]()
+    var xp = X.ptr
+    var pp = P.ptr
+    var sp = S.ptr
+    var acc = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM * _SG_NTN](
+        fill=SIMD[DType.float32, _FRAG8](0)
+    )
+    var kc = 0
+    while kc < K:
+        comptime _NW = SG_BN * (BK // 8)
+        for w in range(tid, _NW, SG_TPB):
+            var j_local = w % SG_BN
+            var krun = (w // SG_BN) * 8
+            var gj = blk_col + j_local
+            var gk0 = kc + krun
+            if gj < N and gk0 < K:
+                var word = pp[(gj * K + gk0) >> 3]
+                var scale = sp[gj * NG + (gk0 >> Q4_SHIFT)]
+                var nibs = (SIMD[DType.uint32, 8](word) >> _Q4_SHIFTS) & 0xF
+                var qf = (nibs.cast[DType.int32]() - 8).cast[
+                    DType.float32
+                ]() * scale
+                comptime for t in range(8):
+                    Bs[(krun + t) * SG_BN + j_local] = (
+                        qf[t] if gk0 + t < K else Float32(0.0)
+                    )
+            else:
+                comptime for t in range(8):
+                    Bs[(krun + t) * SG_BN + j_local] = Float32(0.0)
+        barrier()
+        comptime _KS = BK // _MMA8
+        for kss in range(_KS):
+            var kk = kc + kss * _MMA8
+            if kk >= K:
+                continue
+            var ktail = kk + _MMA8 > K
+            var afrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTM](
+                uninitialized=True
+            )
+            comptime for mi in range(_SG_NTM):
+                var grow = row_base + mi * _MMA8 + frow
+                if grow < M and not ktail:
+                    afrag[mi] = (xp + grow * K + kk + fcol).load[
+                        width=_FRAG8
+                    ]()
+                else:
+                    var af = SIMD[DType.float32, _FRAG8](0)
+                    if grow < M:
+                        comptime for t in range(_FRAG8):
+                            if kk + fcol + t < K:
+                                af[t] = xp[grow * K + kk + fcol + t]
+                    afrag[mi] = af
+            var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](
+                uninitialized=True
+            )
+            comptime for ni in range(_SG_NTN):
+                var brow = (
+                    (kss * _MMA8 + frow) * SG_BN
+                    + (sg % 2) * _SG_SGN
+                    + ni * _MMA8
+                    + fcol
+                )
+                bfrag[ni] = (Bs + brow).load[width=_FRAG8]()
+            comptime for mi in range(_SG_NTM):
+                comptime for ni in range(_SG_NTN):
+                    acc[mi * _SG_NTN + ni] = _mma8x8(
+                        afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
+                    )
+        barrier()
+        kc += BK
+    comptime for mi in range(_SG_NTM):
+        comptime for ni in range(_SG_NTN):
+            var frag = acc[mi * _SG_NTN + ni]
+            comptime for t in range(_FRAG8):
+                var grow = row_base + mi * _MMA8 + frow
+                var gcol = col_base + ni * _MMA8 + fcol + t
+                if grow < M and gcol < N:
+                    var v = frag[t]
+                    if use_bias != 0:
+                        v += rebind[Scalar[DType.float32]](B[gcol])
+                    Y[grow * N + gcol] = rebind[Y.ElementType](v)
+
+
+@always_inline
+def _mma8x8(
+    a: SIMD[DType.float32, _FRAG8],
+    b: SIMD[DType.float32, _FRAG8],
+    c: SIMD[DType.float32, _FRAG8],
+) -> SIMD[DType.float32, _FRAG8]:
+    return llvm_intrinsic[
+        "llvm.air.simdgroup_matrix_8x8_multiply_accumulate.v64f32.v64f32.v64f32.v64f32",
+        SIMD[DType.float32, _FRAG8],
+    ](a, b, c)
+
+
 # ── host helpers (same idioms as the other manual gates) ─────────────────────
 
 
@@ -387,6 +514,29 @@ def bench(ctx: DeviceContext, M: Int, K: Int, N: Int) raises:
         "  f16-MMA ", f16ms, " ms (", flops / f16ms / 1.0e9, " TFLOP/s)  ",
         f32ms / f16ms, "x", sep="",
     )
+    comptime for BK in [64, 128]:
+        comptime kbk = matmul_simd_q4_bk_kernel[type_of(row_major(1)), BK]
+        for _ in range(3):
+            ctx.enqueue_function[kbk](
+                xt, pt, st, bt, yt, M, K, N, NG, 0,
+                grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+                block_dim=SG_TPB,
+            )
+        ctx.synchronize()
+        var t2 = perf_counter_ns()
+        for _ in range(iters):
+            ctx.enqueue_function[kbk](
+                xt, pt, st, bt, yt, M, K, N, NG, 0,
+                grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+                block_dim=SG_TPB,
+            )
+        ctx.synchronize()
+        var bkms = Float64(perf_counter_ns() - t2) / Float64(iters) / 1.0e6
+        print(
+            "            BK=", BK, "  ", bkms, " ms (",
+            flops / bkms / 1.0e9, " TFLOP/s)  ", f32ms / bkms, "x ship",
+            sep="",
+        )
 
 
 def main() raises:
