@@ -80,6 +80,7 @@ from chat import load_chat_template, render_value, json_escape_str
 from template import Template
 from value import Value
 from json import parse_json, bytes_to_string
+from runtime.decode_health import record_decode, decode_status_fields
 
 # Persistent KV-cache capacity (tokens). One Session of this size lives on
 # ServerState for the whole process so successive requests in an agent loop reuse
@@ -911,6 +912,10 @@ def gen_full(
             "%)",
             sep="",
         )
+    # Record decode throughput for the wedge tripwire (/v1/status → decode_healthy).
+    # Keyed on DECODE, not liveness: a wedged Metal queue keeps prefill + /v1/models
+    # fast while decode collapses to ~0.3 tok/s.
+    record_decode(tps, len(gen))
     return Reply(
         gen^, stopped, len(ids), reuse, len(suffix), pf_ms, dec_ms, tps
     )
@@ -2463,7 +2468,9 @@ struct BootApi(Copyable, Handler, Movable):
                     + esc(self.boot[].sp.value()[].model_id)
                     + '","version":"'
                     + MILLFOLIO_VERSION
-                    + '"}'
+                    + '"'
+                    + decode_status_fields()
+                    + "}"
                 )
             return Api(self.boot[].sp.value()).serve(req)
         if req.url == "/health":

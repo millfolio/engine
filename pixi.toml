@@ -91,10 +91,14 @@ test-server-bind = "mojo run -I src -I ../flare -I ../json tests/gates/test_serv
 # weights downloader's supply-chain integrity check. Pure CPU, no GPU/weights/net.
 test-hashing = "mojo run -I src tests/gates/test_hashing.mojo"
 
+# The decode-wedge tripwire (src/runtime/decode_health.mojo) that backs
+# /v1/status's decode_healthy field. Pure CPU — the health-cell logic, not a GPU run.
+test-decode-health = "mojo run -I src -I tests/gates tests/gates/test_decode_health.mojo"
+
 # The CI suite: the pure-CPU gates that need NO GPU, weights, or torch fixtures.
 # Run by .github/workflows/test.yml on every push/PR. (The GPU/weights gates stay
 # manual via their own tasks — see CLAUDE.md.)
-test = { depends-on = ["test-toolcall", "test-server-bind", "test-hashing"] }
+test = { depends-on = ["test-toolcall", "test-server-bind", "test-hashing", "test-decode-health"] }
 
 # GPU gate aggregate — the weight-free Metal gates (compile a GPU kernel, then
 # matmul/RMSNorm/SwiGLU, simdgroup GEMM, and RoPE+GQA attention vs the reference).
