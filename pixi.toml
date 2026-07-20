@@ -187,12 +187,12 @@ flare-tls = { cmd = "clang++ -O2 -std=c++17 -fPIC -DNDEBUG -shared -o $CONDA_PRE
 # pass its HF id (resolved from the local cache) or a checkpoint path:
 #   pixi run serve -- Qwen/Qwen2.5-3B-Instruct
 # The server reports the served model at /v1/models.
-serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/server && ./build/server", depends-on = ["flare-tls"] }
+serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/millfolio-inference && ./build/millfolio-inference", depends-on = ["flare-tls"] }
 
 # Boot-status smoke (manual — needs a Metal machine to BUILD the binary; the
 # missing-model path it exercises never touches the GPU at runtime): a bogus
 # model id must yield instant /v1/status state=error + 503s + a live process.
-boot-smoke = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/server && bash tests/manual/boot_status_smoke.sh", depends-on = ["flare-tls"] }
+boot-smoke = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/millfolio-inference && bash tests/manual/boot_status_smoke.sh", depends-on = ["flare-tls"] }
 
 # Native-Mojo Qwen weights downloader — no huggingface_hub / no Python HF wheel.
 # Fetches safetensors (single-file for 0.5B, sharded for 3B) + config + tokenizer
