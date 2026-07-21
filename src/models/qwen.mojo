@@ -15,6 +15,7 @@ kernels by dim-tuple — that's inherent to comptime specialization, not per-arc
 branching of behavior."""
 
 from std.math import ceildiv, sqrt
+from std.os import getenv
 from std.gpu import WARP_SIZE
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
@@ -172,6 +173,13 @@ struct Weights(ModelWeights, Movable):
     # Behavior flags + engine-relevant dims/eos (the engine is generic over this).
     var cfg: ModelConfig
     """Behavior flags + engine-relevant dims/eos (the engine is generic over this)."""
+    # EXPERIMENTAL A/B: route decode (Tq=1) through the fused megakernel path
+    # (`qwen_layer_mega`, at the bottom of this file) instead of the per-op
+    # `qwen_layer`. Read once from MILLFOLIO_DECODE_MEGA at load; OFF by default,
+    # decode-only, parity-gated (tests/manual/mega_parity.mojo). The production
+    # per-op path and its kernels are never touched — this is purely additive.
+    var decode_mega: Bool
+    """Route decode through the experimental fused megakernel path (env MILLFOLIO_DECODE_MEGA; off by default)."""
 
     # ── ModelWeights conformance (the engine drives the loop via these) ──────────
     def config(self) -> ModelConfig:
@@ -233,6 +241,12 @@ struct Weights(ModelWeights, Movable):
         Raises:
             If a layer kernel dispatch fails.
         """
+        # Decode-only, opt-in A/B seam. Prefill / spec-decode (Tq>1) and every
+        # other caller always take the production per-op path unchanged.
+        if self.decode_mega and Tq == 1:
+            return qwen_layer_mega(
+                ctx, self, l, h, kcs[l], vcs[l], Tq, q_offset, cache_len, dummy
+            )
         return qwen_layer(
             ctx, self, l, h, kcs[l], vcs[l], Tq, q_offset, cache_len, dummy
         )
@@ -636,6 +650,7 @@ def load_weights(
         False,
         q4,
         cfg^,
+        getenv("MILLFOLIO_DECODE_MEGA") == "1",  # decode_mega — off unless set
     )
 
 
@@ -1375,3 +1390,61 @@ def sess_embed(
     for i in range(len(out)):
         out[i] = out[i] * inv
     return out^
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPERIMENTAL — decode megakernel A/B (deletable in one block)
+#
+# Everything below is the OFF-by-default fused-decode experiment. It exists to
+# measure dispatch-latency headroom at decode (the ~24% the batch microbench
+# showed) WITHOUT touching the production per-op path above. It is reached ONLY
+# when a Weights was loaded with MILLFOLIO_DECODE_MEGA=1 AND Tq==1 (decode), via
+# the one branch in `Weights.run_layer`.
+#
+# `qwen_layer_mega` has the SAME signature as `qwen_layer` and — for now — simply
+# delegates to it, so the A/B path is bit-identical (the parity gate is trivially
+# green and a perf A/B shows ~0%). This is the SKELETON: the first fused kernel
+# replaces the delegate body with fewer, larger launches (start with rope_kv +
+# attn_cached), and the fused kernels live in `kernels/mega_layer.mojo`, never in
+# the production kernel set. Deleting this section + the `run_layer` branch + the
+# `decode_mega` field reverts the experiment completely.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def qwen_layer_mega(
+    ctx: DeviceContext,
+    mut w: Weights,
+    l: Int,
+    mut h: DevBuf,
+    mut kc: KVBuf,
+    mut vc: KVBuf,
+    Tq: Int,
+    q_offset: Int,
+    cache_len: Int,
+    mut dummy: DevBuf,
+) raises -> DevBuf:
+    """Fused-decode counterpart of `qwen_layer` (decode-only, opt-in — see the
+    banner above). SKELETON: delegates to the per-op path so the A/B is currently
+    bit-identical; the first fusion replaces this body.
+
+    Args:
+        ctx: The GPU device context.
+        w: The Qwen `Weights`.
+        l: The decoder-layer index.
+        h: The hidden-state buffer for the layer's input.
+        kc: The layer's key cache.
+        vc: The layer's value cache.
+        Tq: The number of query positions (always 1 on this path — decode).
+        q_offset: The absolute position of the first query token.
+        cache_len: The allocated KV-cache length.
+        dummy: A scratch buffer for unused kernel arguments.
+
+    Returns:
+        The updated hidden-state buffer after the layer.
+
+    Raises:
+        If a layer kernel dispatch fails.
+    """
+    # TODO(mega): replace this delegate with the fused launch(es). First target —
+    # fuse rope_kv + attn_cached into one kernel (both per-head, KV-cache-shaped).
+    return qwen_layer(ctx, w, l, h, kc, vc, Tq, q_offset, cache_len, dummy)

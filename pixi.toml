@@ -135,6 +135,7 @@ q4-kernels = { cmd = "mkdir -p build && mojo build tests/manual/q4_kernels.mojo 
 # vs CPU + R-sweep bench vs the shipping kernel on the 3B decode shapes.
 q4-gemv-mr = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mr.mojo -I src -o build/q4_gemv_mr && ./build/q4_gemv_mr" }
 decode-profile = { cmd = "mkdir -p build && mojo build tests/manual/decode_profile.mojo -I src -I ../jinja2.mojo/src -o build/decode_profile && ./build/decode_profile" }
+mega-parity = { cmd = "mkdir -p build && mojo build tests/manual/mega_parity.mojo -I src -I ../jinja2.mojo/src -o build/mega_parity && ./build/mega_parity" }
 q4-gemm-f16 = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemm_f16.mojo -I src -o build/q4_gemm_f16 && ./build/q4_gemm_f16" }
 q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../jinja2.mojo/src -o build/q4_validate && ./build/q4_validate" }
 int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../jinja2.mojo/src -o build/int4_quality && ./build/int4_quality" }
