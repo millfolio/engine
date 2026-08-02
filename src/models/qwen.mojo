@@ -482,8 +482,13 @@ def load_weights(
         )
     else:
         lm_head = load_proj(
-            ctx, paths, entries, name2idx, pfx + "embed_tokens.weight",
-            hidden, q4,
+            ctx,
+            paths,
+            entries,
+            name2idx,
+            pfx + "embed_tokens.weight",
+            hidden,
+            q4,
         )
     var final_norm = load_named(
         ctx, paths, entries, name2idx, pfx + "norm.weight"
@@ -706,12 +711,12 @@ def rope_k(
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            strd,
-            in_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(strd),
+            Int32(in_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -722,12 +727,12 @@ def rope_k(
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            strd,
-            in_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(strd),
+            Int32(in_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -738,12 +743,12 @@ def rope_k(
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            strd,
-            in_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(strd),
+            Int32(in_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -798,13 +803,13 @@ def rope_kv(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            in_stride,
-            k_off,
-            v_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(in_stride),
+            Int32(k_off),
+            Int32(v_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -816,13 +821,13 @@ def rope_kv(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            in_stride,
-            k_off,
-            v_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(in_stride),
+            Int32(k_off),
+            Int32(v_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -834,13 +839,13 @@ def rope_kv(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(knw, nlay),
-            Tq,
-            q_offset,
-            in_stride,
-            k_off,
-            v_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(in_stride),
+            Int32(k_off),
+            Int32(v_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -905,9 +910,10 @@ def attn_cached(
     # DECODE (Tq=1, non-flash): RoPE-Q fused into attention — no rope_q launch, no
     # qr buffer (attn_cached_rope_kernel rotates Q on load).
     if Tq == 1 and not flash_decode:
-        var gd = ceildiv(Tq * hq * WARP_SIZE, BLOCK)
         if arch == 2:
-            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 16, 8, 128, True, 4, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[
+                type_of(lay), 16, 8, 128, True, 4, KV_DTYPE
+            ]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -915,15 +921,17 @@ def attn_cached(
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
-                qstr,
-                q_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(qstr),
+                Int32(q_off),
                 grid_dim=Tq * 16,
                 block_dim=4 * WARP_SIZE,
             )
         elif arch == 3:
-            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 32, 8, 128, True, 4, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[
+                type_of(lay), 32, 8, 128, True, 4, KV_DTYPE
+            ]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -931,15 +939,17 @@ def attn_cached(
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
-                qstr,
-                q_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(qstr),
+                Int32(q_off),
                 grid_dim=Tq * 32,
                 block_dim=4 * WARP_SIZE,
             )
         elif arch == 4:
-            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 40, 8, 128, True, 4, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[
+                type_of(lay), 40, 8, 128, True, 4, KV_DTYPE
+            ]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -947,10 +957,10 @@ def attn_cached(
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
-                qstr,
-                q_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(qstr),
+                Int32(q_off),
                 grid_dim=Tq * 40,
                 block_dim=4 * WARP_SIZE,
             )
@@ -965,15 +975,17 @@ def attn_cached(
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
-                qstr,
-                q_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(qstr),
+                Int32(q_off),
                 grid_dim=Tq * 16,
                 block_dim=4 * WARP_SIZE,
             )
         else:
-            comptime k = attn_cached_rope_kw_kernel[type_of(lay), 14, 2, 64, False, 4, KV_DTYPE]
+            comptime k = attn_cached_rope_kw_kernel[
+                type_of(lay), 14, 2, 64, False, 4, KV_DTYPE
+            ]
             cached_enqueue[k](
                 ctx,
                 TileTensor(q, qslay),
@@ -981,10 +993,10 @@ def attn_cached(
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
-                qstr,
-                q_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(qstr),
+                Int32(q_off),
                 grid_dim=Tq * 14,
                 block_dim=4 * WARP_SIZE,
             )
@@ -1000,12 +1012,12 @@ def attn_cached(
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            qstr,
-            q_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(qstr),
+            Int32(q_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -1016,12 +1028,12 @@ def attn_cached(
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            qstr,
-            q_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(qstr),
+            Int32(q_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -1032,12 +1044,12 @@ def attn_cached(
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            qstr,
-            q_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(qstr),
+            Int32(q_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -1048,12 +1060,12 @@ def attn_cached(
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            qstr,
-            q_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(qstr),
+            Int32(q_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -1064,12 +1076,12 @@ def attn_cached(
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            qstr,
-            q_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(qstr),
+            Int32(q_off),
             THETA,
-            -1,
+            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -1078,7 +1090,9 @@ def attn_cached(
         # 0.5B long context: stream K/V through shared memory (bit-identical, no cliff).
         # Flash is 0.5B-only: HEAD_DIM=128 would double the staged tile to ~32 KB
         # (Metal threadgroup limit), so 3B always uses attn_cached_kernel.
-        comptime kf = flash_attn_kernel[type_of(lay), 14, 2, 64, FLASH_PW, KV_DTYPE]
+        comptime kf = flash_attn_kernel[
+            type_of(lay), 14, 2, 64, FLASH_PW, KV_DTYPE
+        ]
         comptime nwarp = FLASH_PW * 7  # GROUP = 14/2
         cached_enqueue[kf](
             ctx,
@@ -1086,8 +1100,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq, FLASH_PW) * hkv,
             block_dim=nwarp * WARP_SIZE,
         )
@@ -1104,10 +1118,10 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
+                Int32(Tq),
+                Int32(q_offset),
                 Float32(-1.0),
-                0,
+                Int32(0),
                 grid_dim=grid,
                 block_dim=WARP_SIZE,
             )
@@ -1119,10 +1133,10 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
+                Int32(Tq),
+                Int32(q_offset),
                 Float32(-1.0),
-                0,
+                Int32(0),
                 grid_dim=grid,
                 block_dim=WARP_SIZE,
             )
@@ -1134,10 +1148,10 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
+                Int32(Tq),
+                Int32(q_offset),
                 Float32(-1.0),
-                0,
+                Int32(0),
                 grid_dim=grid,
                 block_dim=WARP_SIZE,
             )
@@ -1149,10 +1163,10 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
+                Int32(Tq),
+                Int32(q_offset),
                 Float32(-1.0),
-                0,
+                Int32(0),
                 grid_dim=grid,
                 block_dim=WARP_SIZE,
             )
@@ -1164,10 +1178,10 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(o, lay),
-                Tq,
-                q_offset,
+                Int32(Tq),
+                Int32(q_offset),
                 Float32(-1.0),
-                0,
+                Int32(0),
                 grid_dim=grid,
                 block_dim=WARP_SIZE,
             )
@@ -1180,8 +1194,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
         )
@@ -1193,8 +1207,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
         )
@@ -1206,8 +1220,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
         )
@@ -1219,8 +1233,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
         )
@@ -1232,8 +1246,8 @@ def attn_cached(
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
             TileTensor(o, lay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
             block_dim=BLOCK,
         )

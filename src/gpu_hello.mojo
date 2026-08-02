@@ -30,7 +30,7 @@ def fma_kernel(
     a: TileTensor[dtype, type_of(layout), MutAnyOrigin],
     b: TileTensor[dtype, type_of(layout), MutAnyOrigin],
     c: TileTensor[dtype, type_of(layout), MutAnyOrigin],
-    size: Int,
+    size: UInt32,
 ):
     """Compute `c[i] = a[i] * b[i] + a[i]` elementwise over `size` elements.
 
@@ -41,7 +41,7 @@ def fma_kernel(
         size: Number of leading elements to process.
     """
     var tid = global_idx.x
-    if tid < size:
+    if tid < Int(size):
         c[tid] = a[tid] * b[tid] + a[tid]
 
 
@@ -75,7 +75,7 @@ def main() raises:
         a,
         b,
         c,
-        N,
+        UInt32(N),
         grid_dim=ceildiv(N, BLOCK),
         block_dim=BLOCK,
     )

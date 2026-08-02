@@ -698,12 +698,12 @@ def gemma_attn(
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            W,
-            0,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(0),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -714,12 +714,12 @@ def gemma_attn(
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            W,
-            0,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(0),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -728,34 +728,38 @@ def gemma_attn(
     var clay = row_major(cache_len)
     var knlay = row_major(head_dim)
     if l_full:
-        comptime kk = rope_k_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, True, KV_DTYPE]
+        comptime kk = rope_k_kernel[
+            type_of(qslay), FU_HKV, FU_HEAD_DIM, True, KV_DTYPE
+        ]
         cached_enqueue[kk](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
             TileTensor(knw, knlay),
-            Tq,
-            q_offset,
-            W,
-            k_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(k_off),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
     else:
-        comptime kk = rope_k_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, True, KV_DTYPE]
+        comptime kk = rope_k_kernel[
+            type_of(qslay), SL_HKV, SL_HEAD_DIM, True, KV_DTYPE
+        ]
         cached_enqueue[kk](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
             TileTensor(knw, knlay),
-            Tq,
-            q_offset,
-            W,
-            k_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(k_off),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -764,28 +768,32 @@ def gemma_attn(
     # sliding reads the V slice at v_off.
     var vsrc_off = k_off if l_full else v_off
     if l_full:
-        comptime kv = vnorm_kernel[type_of(qslay), FU_HKV, FU_HEAD_DIM, KV_DTYPE]
+        comptime kv = vnorm_kernel[
+            type_of(qslay), FU_HKV, FU_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(vc, clay),
-            Tq,
-            q_offset,
-            W,
-            vsrc_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(vsrc_off),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
     else:
-        comptime kv = vnorm_kernel[type_of(qslay), SL_HKV, SL_HEAD_DIM, KV_DTYPE]
+        comptime kv = vnorm_kernel[
+            type_of(qslay), SL_HKV, SL_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(vc, clay),
-            Tq,
-            q_offset,
-            W,
-            vsrc_off,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(vsrc_off),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
             block_dim=BLOCK,
         )
@@ -795,32 +803,36 @@ def gemma_attn(
     var olay = row_major(Tq * q_dim)
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
-        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, FU_HKV, FU_HEAD_DIM, KV_DTYPE]
+        comptime ka = tc_attn_kernel[
+            type_of(olay), G_HQ, FU_HKV, FU_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
             TileTensor(o, olay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             Float32(1.0),
-            0,
+            Int32(0),
             grid_dim=grid,
             block_dim=WARP_SIZE,
         )
     else:
-        comptime ka = tc_attn_kernel[type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM, KV_DTYPE]
+        comptime ka = tc_attn_kernel[
+            type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
             TileTensor(o, olay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             Float32(1.0),
-            G_SLIDING_WINDOW,
+            Int32(G_SLIDING_WINDOW),
             grid_dim=grid,
             block_dim=WARP_SIZE,
         )

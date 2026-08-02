@@ -237,7 +237,9 @@ struct ServerState(Movable):
     def __init__(
         out self,
         var ctx: DeviceContext,
-        var model: Variant[Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights],
+        var model: Variant[
+            Weights, GemmaWeights, GemmaE2bWeights, GemmaE4bWeights
+        ],
         cfg: ModelConfig,
         primary_arch: Int,
         max_seq: Int,
@@ -622,7 +624,7 @@ def _warmup(mut s: ServerState) raises:
     own-KV vs KV-shared) are all touched. Output is discarded and the KV session
     is reset to empty — no effect on numerics or on the first real request.
     """
-    var pair = [1, 1]  # two arbitrary in-vocab token ids (BOS-ish)
+    var pair: List[Int] = [1, 1]  # two arbitrary in-vocab token ids (BOS-ish)
     _ = _prefill_suffix(s, pair, 0)  # prefill kernels (M=2)
     _ = _step(s, 1)  # decode kernels (M=1)
     _ = _step(s, 1)
@@ -2504,8 +2506,7 @@ struct BootApi(Copyable, Handler, Movable):
                 + '"}'
             )
         return service_unavailable(
-            '{"error":{"type":"loading","message":"the model is still loading'
-            " ("
+            '{"error":{"type":"loading","message":"the model is still loading ('
             + _phase_name(phase)
             + ') — retry shortly"}}'
         )
@@ -2591,7 +2592,9 @@ def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
     # Publish the spec for /v1/status, then verify it exists on disk — a
     # missing model becomes a status the CLI/app can show ("model not
     # downloaded"), not a crash loop under launchd.
-    b[].model_id = model_id.copy() if model_id.byte_length() > 0 else ckpt.copy()
+    b[].model_id = (
+        model_id.copy() if model_id.byte_length() > 0 else ckpt.copy()
+    )
     if not (exists(ckpt) or isdir(ckpt)):
         raise Error(
             "model not downloaded: "
@@ -2938,7 +2941,7 @@ def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
         embed_id^,
     )
     var sp = alloc[ServerState](1)
-    sp.init_pointee_move(state^)
+    sp.unsafe_write(state^)
     # Pre-compile every generative GPU pipeline off the serving path (skip the
     # embed-only primary, which has no generative forward). See `_warmup`.
     if not primary_is_embed:
@@ -3000,7 +3003,7 @@ def main() raises:
         sep="",
     )
     var boot = alloc[BootState](1)
-    boot.init_pointee_move(BootState())
+    boot.unsafe_write(BootState())
     var th = ThreadHandle.spawn[_boot_worker](
         _OpaquePtr(unsafe_from_address=Int(boot))
     )

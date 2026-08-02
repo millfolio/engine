@@ -32,7 +32,9 @@ def upload_bf16(
         var mt = TileTensor(m, row_major(n))
         for i in range(n):
             var f = host[i]
-            var bits = UnsafePointer(to=f).bitcast[UInt32]()[0]
+            var bits = UnsafePointer(to=f).unsafe_bitcast[UInt32]()[
+                unsafe_offset=0
+            ]
             # round-to-nearest-even: add 0x7FFF + lsb of the kept mantissa
             var rounded = bits + 0x7FFF + ((bits >> 16) & 1)
             mt[i] = rebind[mt.ElementType](UInt16(rounded >> 16))
@@ -48,9 +50,9 @@ def read_f32(path: String) raises -> List[Float32]:
     var out = List[Float32]()
     with open(path, "r") as f:
         var raw = f.read_bytes()
-        var p = raw.unsafe_ptr().bitcast[Float32]()
+        var p = raw.unsafe_ptr().unsafe_bitcast[Float32]()
         for i in range(len(raw) // 4):
-            out.append(p[i])
+            out.append(p[unsafe_offset=i])
     return out^
 
 

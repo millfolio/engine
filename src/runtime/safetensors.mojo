@@ -5,7 +5,7 @@ weight representation types are shared from tensor_ops to avoid an import cycle.
 
 from std.math import ceildiv
 from std.os.path import isdir
-from std.memory import memcpy
+from std.memory import unsafe_memcpy
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
@@ -338,12 +338,12 @@ def load_one(
     var count = nbytes // 2
     var dev_f32 = ctx.enqueue_create_buffer[DType.float32](count)
     with open(path, "r") as f:
-        _ = f.seek(UInt64(begin))
+        _ = f.seek(begin)
         var raw = f.read_bytes(nbytes)
         var host = ctx.enqueue_create_host_buffer[DType.uint16](count)
         ctx.synchronize()
-        memcpy(
-            dest=host.unsafe_ptr().bitcast[UInt8](),
+        unsafe_memcpy(
+            dest=host.unsafe_ptr().unsafe_bitcast[UInt8](),
             src=raw.unsafe_ptr(),
             count=nbytes,
         )
@@ -354,7 +354,7 @@ def load_one(
         ctx.enqueue_function[k](
             TileTensor(dev_u16, lay),
             TileTensor(dev_f32, lay),
-            count,
+            Int32(count),
             grid_dim=ceildiv(count, BLOCK),
             block_dim=BLOCK,
         )
@@ -414,10 +414,10 @@ def load_one_bf16(
     # which the gemma-4 e2b embed_tokens_per_layer (262144×8960 bf16 = 4.7 GiB) hits.
     comptime CHUNK = 1 << 30
     with open(path, "r") as f:
-        _ = f.seek(UInt64(begin))
+        _ = f.seek(begin)
         var host = ctx.enqueue_create_host_buffer[DType.uint16](count)
         ctx.synchronize()
-        var dst = host.unsafe_ptr().bitcast[UInt8]()
+        var dst = host.unsafe_ptr().unsafe_bitcast[UInt8]()
         var off = 0
         while off < nbytes:
             var want = nbytes - off
@@ -427,7 +427,9 @@ def load_one_bf16(
             var got = len(raw)
             if got == 0:
                 break
-            memcpy(dest=dst + off, src=raw.unsafe_ptr(), count=got)
+            unsafe_memcpy(
+                dest=dst.unsafe_offset(off), src=raw.unsafe_ptr(), count=got
+            )
             off += got
         ctx.enqueue_copy(dev_u16, host)
         ctx.synchronize()
@@ -494,24 +496,26 @@ def load_one_q4(
     var pp = packed_host.unsafe_ptr()
     var sp = scales_host.unsafe_ptr()
     for i in range(pcount):
-        pp[i] = 0
+        pp[unsafe_offset=i] = 0
     with open(path, "r") as f:
-        _ = f.seek(UInt64(begin))
+        _ = f.seek(begin)
         var raw = f.read_bytes(nbytes)
-        var u16 = raw.unsafe_ptr().bitcast[UInt16]()  # little-endian bf16 bits
+        var u16 = raw.unsafe_ptr().unsafe_bitcast[
+            UInt16
+        ]()  # little-endian bf16 bits
         for n in range(N):
             for g in range(NG):
                 var amax = Float32(0.0)
                 for k in range(g * Q4_GROUP, (g + 1) * Q4_GROUP):
-                    var v = bf16_widen(u16[n * K + k])
+                    var v = bf16_widen(u16[unsafe_offset=n * K + k])
                     var a = v if v >= 0.0 else -v
                     if a > amax:
                         amax = a
                 var s = amax / 7.0 if amax > 0.0 else Float32(1.0)
-                sp[n * NG + g] = s
+                sp[unsafe_offset=n * NG + g] = s
                 var inv = 1.0 / s
                 for k in range(g * Q4_GROUP, (g + 1) * Q4_GROUP):
-                    var q = bf16_widen(u16[n * K + k]) * inv
+                    var q = bf16_widen(u16[unsafe_offset=n * K + k]) * inv
                     var half = Float32(0.5) if q >= 0.0 else Float32(-0.5)
                     var qr = Int(q + half)
                     if qr > 7:
@@ -519,7 +523,7 @@ def load_one_q4(
                     elif qr < -7:
                         qr = -7
                     var lin = n * K + k
-                    pp[lin >> 3] = pp[lin >> 3] | (
+                    pp[unsafe_offset=lin >> 3] = pp[unsafe_offset=lin >> 3] | (
                         UInt32(qr + 8) << UInt32((lin & 7) * 4)
                     )
     var packed_dev = ctx.enqueue_create_buffer[DType.uint32](pcount)
@@ -609,28 +613,32 @@ def fuse_pair(
         var sc = ctx.enqueue_create_buffer[DType.float32](sa + sb)
         with pc.map_to_host() as d:
             with a.packed.map_to_host() as ah:
-                memcpy(
-                    dest=d.unsafe_ptr().bitcast[UInt8](),
-                    src=ah.unsafe_ptr().bitcast[UInt8](),
+                unsafe_memcpy(
+                    dest=d.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    src=ah.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=wa * 4,
                 )
             with b.packed.map_to_host() as bh:
-                memcpy(
-                    dest=(d.unsafe_ptr() + wa).bitcast[UInt8](),
-                    src=bh.unsafe_ptr().bitcast[UInt8](),
+                unsafe_memcpy(
+                    dest=(d.unsafe_ptr().unsafe_offset(wa)).unsafe_bitcast[
+                        UInt8
+                    ](),
+                    src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=wb * 4,
                 )
         with sc.map_to_host() as d:
             with a.scales.map_to_host() as ah:
-                memcpy(
-                    dest=d.unsafe_ptr().bitcast[UInt8](),
-                    src=ah.unsafe_ptr().bitcast[UInt8](),
+                unsafe_memcpy(
+                    dest=d.unsafe_ptr().unsafe_bitcast[UInt8](),
+                    src=ah.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=sa * 4,
                 )
             with b.scales.map_to_host() as bh:
-                memcpy(
-                    dest=(d.unsafe_ptr() + sa).bitcast[UInt8](),
-                    src=bh.unsafe_ptr().bitcast[UInt8](),
+                unsafe_memcpy(
+                    dest=(d.unsafe_ptr().unsafe_offset(sa)).unsafe_bitcast[
+                        UInt8
+                    ](),
+                    src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=sb * 4,
                 )
         return QMat(ctx.enqueue_create_buffer[DType.uint16](1), pc^, sc^, True)
@@ -639,15 +647,15 @@ def fuse_pair(
     var bc = ctx.enqueue_create_buffer[DType.uint16](na + nb)
     with bc.map_to_host() as d:
         with a.bf16.map_to_host() as ah:
-            memcpy(
-                dest=d.unsafe_ptr().bitcast[UInt8](),
-                src=ah.unsafe_ptr().bitcast[UInt8](),
+            unsafe_memcpy(
+                dest=d.unsafe_ptr().unsafe_bitcast[UInt8](),
+                src=ah.unsafe_ptr().unsafe_bitcast[UInt8](),
                 count=na * 2,
             )
         with b.bf16.map_to_host() as bh:
-            memcpy(
-                dest=(d.unsafe_ptr() + na).bitcast[UInt8](),
-                src=bh.unsafe_ptr().bitcast[UInt8](),
+            unsafe_memcpy(
+                dest=(d.unsafe_ptr().unsafe_offset(na)).unsafe_bitcast[UInt8](),
+                src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                 count=nb * 2,
             )
     return QMat(
@@ -679,15 +687,15 @@ def concat_bias(
     var c = ctx.enqueue_create_buffer[DType.float32](na + nb)
     with c.map_to_host() as d:
         with a.map_to_host() as ah:
-            memcpy(
-                dest=d.unsafe_ptr().bitcast[UInt8](),
-                src=ah.unsafe_ptr().bitcast[UInt8](),
+            unsafe_memcpy(
+                dest=d.unsafe_ptr().unsafe_bitcast[UInt8](),
+                src=ah.unsafe_ptr().unsafe_bitcast[UInt8](),
                 count=na * 4,
             )
         with b.map_to_host() as bh:
-            memcpy(
-                dest=(d.unsafe_ptr() + na).bitcast[UInt8](),
-                src=bh.unsafe_ptr().bitcast[UInt8](),
+            unsafe_memcpy(
+                dest=(d.unsafe_ptr().unsafe_offset(na)).unsafe_bitcast[UInt8](),
+                src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                 count=nb * 4,
             )
     return c^

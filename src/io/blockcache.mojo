@@ -26,7 +26,7 @@ memory — a pointer, no copy) + raw file bytes.
 from std.os import makedirs, remove
 from std.os.path import exists
 from std.gpu.host import DeviceContext, DeviceBuffer
-from std.memory import memcpy
+from std.memory import unsafe_memcpy
 
 comptime DevBuf = DeviceBuffer[DType.float32]
 comptime KVBuf = DeviceBuffer[DType.float32]  # mirror of tensor_ops.KV_DTYPE
@@ -108,7 +108,9 @@ struct BlockCache(Movable):
         self.B = B
         self.nkv = nkv
         self.nlayers = nlayers
-        var blk_bytes = B * 4 + nlayers * 2 * B * nkv * 4  # id header (i32) + f32 KV
+        var blk_bytes = (
+            B * 4 + nlayers * 2 * B * nkv * 4
+        )  # id header (i32) + f32 KV
         self.max_blocks = budget_bytes // blk_bytes
         self.enabled = True
         self.order = List[String]()
@@ -187,9 +189,9 @@ struct BlockCache(Movable):
             var raw = f.read_bytes(self.B * 4)
             if len(raw) < self.B * 4:
                 return False
-            var p = raw.unsafe_ptr().bitcast[Int32]()
+            var p = raw.unsafe_ptr().unsafe_bitcast[Int32]()
             for j in range(self.B):
-                if Int(p[j]) != ids[bi * self.B + j]:
+                if Int(p[unsafe_offset=j]) != ids[bi * self.B + j]:
                     return False
         return True
 
@@ -252,27 +254,33 @@ struct BlockCache(Movable):
         """
         if not self.enabled:
             return
-        var slice_f = self.B * self.nkv  # elements per (block, layer) slice (f16 = 2 bytes)
+        var slice_f = (
+            self.B * self.nkv
+        )  # elements per (block, layer) slice (f16 = 2 bytes)
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "w") as f:
                 self._write_ids(f, ids, bi * self.B)
                 for l in range(self.nlayers):
                     with kcs[l].map_to_host() as h:
                         var p = (
-                            h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
+                            h.unsafe_ptr()
+                            .unsafe_bitcast[UInt8]()
+                            .unsafe_offset(bi * slice_f * 4)
                         )
                         f.write_bytes(
                             Span[UInt8, MutUntrackedOrigin](
-                                ptr=p, length=slice_f * 4
+                                unsafe_ptr=p, length=slice_f * 4
                             )
                         )
                     with vcs[l].map_to_host() as h:
                         var p = (
-                            h.unsafe_ptr().bitcast[UInt8]() + bi * slice_f * 4
+                            h.unsafe_ptr()
+                            .unsafe_bitcast[UInt8]()
+                            .unsafe_offset(bi * slice_f * 4)
                         )
                         f.write_bytes(
                             Span[UInt8, MutUntrackedOrigin](
-                                ptr=p, length=slice_f * 4
+                                unsafe_ptr=p, length=slice_f * 4
                             )
                         )
 
@@ -305,17 +313,19 @@ struct BlockCache(Movable):
                 for l in range(self.nlayers):
                     with kcs[l].map_to_host() as h:
                         var raw = f.read_bytes(slice_f * 4)
-                        memcpy(
-                            dest=h.unsafe_ptr().bitcast[UInt8]()
-                            + bi * slice_f * 4,
+                        unsafe_memcpy(
+                            dest=h.unsafe_ptr()
+                            .unsafe_bitcast[UInt8]()
+                            .unsafe_offset(bi * slice_f * 4),
                             src=raw.unsafe_ptr(),
                             count=slice_f * 4,
                         )
                     with vcs[l].map_to_host() as h:
                         var raw = f.read_bytes(slice_f * 4)
-                        memcpy(
-                            dest=h.unsafe_ptr().bitcast[UInt8]()
-                            + bi * slice_f * 4,
+                        unsafe_memcpy(
+                            dest=h.unsafe_ptr()
+                            .unsafe_bitcast[UInt8]()
+                            .unsafe_offset(bi * slice_f * 4),
                             src=raw.unsafe_ptr(),
                             count=slice_f * 4,
                         )

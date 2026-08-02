@@ -782,12 +782,12 @@ def e2b_attn(
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            W,
-            0,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(0),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -798,12 +798,12 @@ def e2b_attn(
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
             TileTensor(qnw, qnlay),
-            Tq,
-            q_offset,
-            W,
-            0,
+            Int32(Tq),
+            Int32(q_offset),
+            Int32(W),
+            Int32(0),
             theta,
-            rot,
+            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
             block_dim=BLOCK,
         )
@@ -821,12 +821,12 @@ def e2b_attn(
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
                 TileTensor(knw, knlay),
-                Tq,
-                q_offset,
-                W,
-                k_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(W),
+                Int32(k_off),
                 theta,
-                rot,
+                Int32(rot),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
                 block_dim=BLOCK,
             )
@@ -839,39 +839,43 @@ def e2b_attn(
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
                 TileTensor(knw, knlay),
-                Tq,
-                q_offset,
-                W,
-                k_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(W),
+                Int32(k_off),
                 theta,
-                rot,
+                Int32(rot),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
                 block_dim=BLOCK,
             )
         # V: scale-free v_norm → own cache rows (mirror 12B: Gemma-4 norms V).
         if l_full:
-            comptime kv = vnorm_kernel[type_of(qslay), EFU_HKV, EFU_HEAD_DIM, KV_DTYPE]
+            comptime kv = vnorm_kernel[
+                type_of(qslay), EFU_HKV, EFU_HEAD_DIM, KV_DTYPE
+            ]
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(vc, clay),
-                Tq,
-                q_offset,
-                W,
-                v_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(W),
+                Int32(v_off),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
                 block_dim=BLOCK,
             )
         else:
-            comptime kv = vnorm_kernel[type_of(qslay), ESL_HKV, ESL_HEAD_DIM, KV_DTYPE]
+            comptime kv = vnorm_kernel[
+                type_of(qslay), ESL_HKV, ESL_HEAD_DIM, KV_DTYPE
+            ]
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(vc, clay),
-                Tq,
-                q_offset,
-                W,
-                v_off,
+                Int32(Tq),
+                Int32(q_offset),
+                Int32(W),
+                Int32(v_off),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
                 block_dim=BLOCK,
             )
@@ -880,32 +884,36 @@ def e2b_attn(
     var olay = row_major(Tq * q_dim)
     var grid = ceildiv(Tq, 8) * hq
     if l_full:
-        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, EFU_HKV, EFU_HEAD_DIM, KV_DTYPE]
+        comptime ka = tc_attn_kernel[
+            type_of(olay), E_HQ, EFU_HKV, EFU_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
             TileTensor(o, olay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             Float32(1.0),
-            0,
+            Int32(0),
             grid_dim=grid,
             block_dim=WARP_SIZE,
         )
     else:
-        comptime ka = tc_attn_kernel[type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM, KV_DTYPE]
+        comptime ka = tc_attn_kernel[
+            type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM, KV_DTYPE
+        ]
         cached_enqueue[ka](
             ctx,
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
             TileTensor(o, olay),
-            Tq,
-            q_offset,
+            Int32(Tq),
+            Int32(q_offset),
             Float32(1.0),
-            E_SLIDING_WINDOW,
+            Int32(E_SLIDING_WINDOW),
             grid_dim=grid,
             block_dim=WARP_SIZE,
         )
