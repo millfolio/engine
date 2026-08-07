@@ -13,7 +13,7 @@ accelerator — exits non-zero so `pixi run gpu-hello` is a real gate, not a dem
 from std.math import ceildiv
 from std.sys import has_accelerator
 from std.gpu import global_idx
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
 comptime dtype = DType.float32
@@ -30,16 +30,16 @@ def fma_kernel(
     a: TileTensor[dtype, type_of(layout), MutAnyOrigin],
     b: TileTensor[dtype, type_of(layout), MutAnyOrigin],
     c: TileTensor[dtype, type_of(layout), MutAnyOrigin],
-    size: UInt32,
-):
+    size_arg: Int32):
     """Compute `c[i] = a[i] * b[i] + a[i]` elementwise over `size` elements.
 
     Args:
         a: Input buffer read as both multiplicand and addend.
         b: Input buffer used as the multiplier.
         c: Output buffer receiving the fused multiply-add result.
-        size: Number of leading elements to process.
+        size_arg: Number of leading elements to process.
     """
+    var size = Int(size_arg)
     var tid = global_idx.x
     if tid < Int(size):
         c[tid] = a[tid] * b[tid] + a[tid]
@@ -74,11 +74,9 @@ def main() raises:
     ctx.enqueue_function[fma_kernel](
         a,
         b,
-        c,
-        UInt32(N),
+        c,        Int32(N),
         grid_dim=ceildiv(N, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     ctx.synchronize()
 
     var errors = 0

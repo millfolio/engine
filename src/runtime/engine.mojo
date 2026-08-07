@@ -6,7 +6,7 @@ last-position logits) via the trait; everything here — caching, the loop, samp
 — is reused unchanged across families. Adding a family needs no engine change."""
 
 from std.time import perf_counter_ns
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
 from runtime.tensor_ops import DevBuf, KVBuf, KV_DTYPE

@@ -5,7 +5,7 @@ Calls the library `generate` and compares the produced ids to HF greedy generati
 """
 
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import load_weights, generate
 from testio import read_text, read_i32, ints_from

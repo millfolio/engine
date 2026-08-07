@@ -3,7 +3,7 @@ If the full-attention layers (5,11,17,…,47) blow up or collapse the hidden sta
 relative to sliding layers, that localizes the 12B calibration bug to the
 full-attention path (head_dim 512, 1 KV, V=k reuse). No HF needed."""
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.math import sqrt
 from models.gemma import load_gemma_weights, _is_full_layer, G_NLAYERS
 from runtime.engine import new_session, upload_ids

@@ -6,7 +6,7 @@ argmax against HF (`pixi run forward-capture`). `pixi run test-forward`.
 """
 
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 
 from model import (
     Weights,

@@ -4,7 +4,7 @@ prefills, then times N single-token forwards split into embed / 35-layer loop /
 LM head. `pixi run e2b-timing`."""
 
 from std.time import perf_counter_ns
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
 from runtime.engine import (
     new_session,

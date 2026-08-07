@@ -7,7 +7,7 @@ Arg: "int4" loads group-128 int4 weights; default is bf16.
 """
 
 from std.sys import argv
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma_e2b import load_e2b_weights
 from runtime.engine import new_session, upload_ids
 from runtime.tensor_ops import probe_simd_gemm

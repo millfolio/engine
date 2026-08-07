@@ -20,8 +20,8 @@ not a concurrency hazard in practice.
 """
 
 from std.ffi import _Global
-from std.gpu.host import DeviceContext
-from std.gpu.host.dim import Dim
+from max.gpu.host import DeviceContext
+from max.gpu.host.dim import Dim
 from std.builtin.device_passable import DevicePassable
 from std.reflection import reflect_fn
 

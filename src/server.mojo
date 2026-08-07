@@ -24,8 +24,8 @@ single-threaded here — one request in flight at a time (max-backend §10 #4).
 """
 
 from std.atomic import fence
-from std.gpu.host import DeviceContext
-from std.memory import alloc
+from max.gpu.host import DeviceContext
+from std.memory.alloc import unsafe_alloc
 from std.time import perf_counter_ns
 from std.sys import argv
 from std.os import getenv
@@ -628,7 +628,8 @@ def _warmup(mut s: ServerState) raises:
     _ = _prefill_suffix(s, pair, 0)  # prefill kernels (M=2)
     _ = _step(s, 1)  # decode kernels (M=1)
     _ = _step(s, 1)
-    _ = _verify(s, [1, 1, 1])  # spec-verify batch kernels (M=3)
+    var triple: List[Int] = [1, 1, 1]
+    _ = _verify(s, triple)  # spec-verify batch kernels (M=3)
     # Discard the warmup context: next real prefill writes from position 0.
     s.sess.pos = 0
     s.cached = List[Int]()
@@ -1490,7 +1491,7 @@ struct Api(Copyable, Handler, Movable):
     """The flare HTTP handler: routes requests by method + path to the endpoint methods.
     """
 
-    var st: UnsafePointer[ServerState, MutUntrackedOrigin]
+    var st: Pointer[ServerState, MutUntrackedOrigin]
     """Pointer to the shared, mutable `ServerState` (model + caches)."""
 
     def serve(self, req: Request) raises -> Response:
@@ -2429,7 +2430,7 @@ struct BootState(Movable):
     """The model spec being loaded; published by the PHASE_TOKENIZER flip."""
     var error: String
     """Why loading failed; published by the BOOT_ERROR flip."""
-    var sp: Optional[UnsafePointer[ServerState, MutUntrackedOrigin]]
+    var sp: Optional[Pointer[ServerState, MutUntrackedOrigin]]
     """The ready ServerState; published by the BOOT_READY flip."""
 
     def __init__(out self):
@@ -2445,7 +2446,7 @@ struct BootApi(Copyable, Handler, Movable):
     """Wraps `Api`: delegates once the model is ready; until then answers
     /health + /v1/status instantly and 503s everything else with the reason."""
 
-    var boot: UnsafePointer[BootState, MutUntrackedOrigin]
+    var boot: Pointer[BootState, MutUntrackedOrigin]
     """Pointer to the shared BootState cell (heap-allocated in main)."""
 
     def serve(self, req: Request) raises -> Response:
@@ -2528,7 +2529,7 @@ def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
     variable separating that wedge from the previous architecture (queue
     created + used on the serving thread; never wedged across days of demo
     uptime). One parked thread costs ~500 KB of stack."""
-    var b = UnsafePointer[BootState, MutUntrackedOrigin](
+    var b = Pointer[BootState, MutUntrackedOrigin](
         unsafe_from_address=Int(arg)
     )
     try:
@@ -2542,7 +2543,7 @@ def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
         _ = libc_nanosleep_ms(60_000)  # park; wakes only to re-park
 
 
-def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
+def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
     """The whole model load, off the serving thread: resolve the checkpoint,
     load tokenizer + weights (+ the embedding model), build the ServerState,
     warm up, then publish it to `b` (BOOT_READY). The reactor owns all GPU work
@@ -2940,7 +2941,7 @@ def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
         embed_tok^,
         embed_id^,
     )
-    var sp = alloc[ServerState](1)
+    var sp = unsafe_alloc[ServerState](1)
     sp.unsafe_write(state^)
     # Pre-compile every generative GPU pipeline off the serving path (skip the
     # embed-only primary, which has no generative forward). See `_warmup`.
@@ -2951,8 +2952,8 @@ def _boot_load(b: UnsafePointer[BootState, MutUntrackedOrigin]) raises:
 
     # Publish: from the next request on, BootApi delegates to Api(sp) and the
     # reactor thread owns all GPU work (sequential handoff via the fence).
-    b[].sp = Optional[UnsafePointer[ServerState, MutUntrackedOrigin]](
-        UnsafePointer[ServerState, MutUntrackedOrigin](
+    b[].sp = Optional[Pointer[ServerState, MutUntrackedOrigin]](
+        Pointer[ServerState, MutUntrackedOrigin](
             unsafe_from_address=Int(sp)
         )
     )
@@ -3002,7 +3003,7 @@ def main() raises:
         " — the model is loading; GET /v1/status for progress…",
         sep="",
     )
-    var boot = alloc[BootState](1)
+    var boot = unsafe_alloc[BootState](1)
     boot.unsafe_write(BootState())
     var th = ThreadHandle.spawn[_boot_worker](
         _OpaquePtr(unsafe_from_address=Int(boot))
@@ -3010,7 +3011,7 @@ def main() raises:
     th.detach()
     srv.serve(
         BootApi(
-            UnsafePointer[BootState, MutUntrackedOrigin](
+            Pointer[BootState, MutUntrackedOrigin](
                 unsafe_from_address=Int(boot)
             )
         )

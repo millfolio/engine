@@ -6,7 +6,7 @@ weight representation types are shared from tensor_ops to avoid an import cycle.
 from std.math import ceildiv
 from std.os.path import isdir
 from std.memory import unsafe_memcpy
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
 from kernels import cvt_kernel, Q4_GROUP, bf16_widen
@@ -353,11 +353,9 @@ def load_one(
         comptime k = cvt_kernel[type_of(lay)]
         ctx.enqueue_function[k](
             TileTensor(dev_u16, lay),
-            TileTensor(dev_f32, lay),
-            Int32(count),
+            TileTensor(dev_f32, lay),            Int32(count),
             grid_dim=ceildiv(count, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
         ctx.synchronize()
     return dev_f32^
 
@@ -427,9 +425,7 @@ def load_one_bf16(
             var got = len(raw)
             if got == 0:
                 break
-            unsafe_memcpy(
-                dest=dst.unsafe_offset(off), src=raw.unsafe_ptr(), count=got
-            )
+            unsafe_memcpy(dest=dst.unsafe_offset(off), src=raw.unsafe_ptr(), count=got)
             off += got
         ctx.enqueue_copy(dev_u16, host)
         ctx.synchronize()
@@ -500,9 +496,7 @@ def load_one_q4(
     with open(path, "r") as f:
         _ = f.seek(begin)
         var raw = f.read_bytes(nbytes)
-        var u16 = raw.unsafe_ptr().unsafe_bitcast[
-            UInt16
-        ]()  # little-endian bf16 bits
+        var u16 = raw.unsafe_ptr().unsafe_bitcast[UInt16]()  # little-endian bf16 bits
         for n in range(N):
             for g in range(NG):
                 var amax = Float32(0.0)
@@ -620,9 +614,7 @@ def fuse_pair(
                 )
             with b.packed.map_to_host() as bh:
                 unsafe_memcpy(
-                    dest=(d.unsafe_ptr().unsafe_offset(wa)).unsafe_bitcast[
-                        UInt8
-                    ](),
+                    dest=(d.unsafe_ptr().unsafe_offset(wa)).unsafe_bitcast[UInt8](),
                     src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=wb * 4,
                 )
@@ -635,9 +627,7 @@ def fuse_pair(
                 )
             with b.scales.map_to_host() as bh:
                 unsafe_memcpy(
-                    dest=(d.unsafe_ptr().unsafe_offset(sa)).unsafe_bitcast[
-                        UInt8
-                    ](),
+                    dest=(d.unsafe_ptr().unsafe_offset(sa)).unsafe_bitcast[UInt8](),
                     src=bh.unsafe_ptr().unsafe_bitcast[UInt8](),
                     count=sb * 4,
                 )

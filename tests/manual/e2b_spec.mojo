@@ -4,7 +4,7 @@ TARGET. Loads both (int4) co-resident, runs greedy `generate` (baseline) and
 exact), and reports tok/s + draft acceptance + speedup. `pixi run e2b-spec`."""
 
 from std.time import perf_counter_ns
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
 from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
 from runtime.engine import generate, generate_spec_draft

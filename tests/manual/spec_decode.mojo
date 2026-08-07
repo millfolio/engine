@@ -14,7 +14,7 @@ prose prompt as a control.
     pixi run spec-decode
 """
 from std.time import perf_counter_ns
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
 from runtime.engine import (
     generate,

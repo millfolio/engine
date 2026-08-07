@@ -18,7 +18,7 @@ from std.math import sqrt
 from std.os import getenv
 from std.os.path import exists
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import load_weights, sess_embed
 from testio import read_text, read_bytes_file, ints_from

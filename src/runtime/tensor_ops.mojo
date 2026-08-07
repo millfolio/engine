@@ -6,8 +6,9 @@ the loader (safetensors.mojo) and the model can share them without a cycle.
 No model-specific constants: every op takes its dims at the call site."""
 
 from std.math import ceildiv
+from std.memory import unsafe_memcpy
 from std.gpu import WARP_SIZE
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
@@ -113,6 +114,31 @@ struct QMat(Movable):
         self.q4 = q4
 
 
+def download_f32(mut buf: DevBuf, n: Int) raises -> List[Float32]:
+    """The first `n` f32 elements of `buf`, copied to the host in ONE memcpy.
+
+    The previous idiom — a per-element `append(mt[i])` loop over the mapped
+    buffer — cost milliseconds per decode step at vocab size (151936 appends
+    with a TileTensor index each) and dominated the lm_head+logits phase once
+    the MAX 26.5 driver batched kernel dispatch. Callers must `synchronize()`
+    first; `map_to_host` only guarantees the mapping, not kernel completion.
+
+    Args:
+        buf: The device buffer to copy from.
+        n: Number of leading f32 elements to copy.
+
+    Returns:
+        A host `List[Float32]` of length `n`.
+
+    Raises:
+        If mapping the buffer to the host fails.
+    """
+    var out = List[Float32](length=n, fill=0.0)
+    with buf.map_to_host() as m:
+        unsafe_memcpy(dest=out.unsafe_ptr(), src=m.unsafe_ptr(), count=n)
+    return out^
+
+
 def qmat_bf16(ctx: DeviceContext, var buf: WBuf) raises -> QMat:
     """Wrap raw bf16 weights in a QMat (q4=False), with dummy int4 buffers.
 
@@ -181,14 +207,9 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(use_bias),
+            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif simd_ok:
         # prefill, fast path: simdgroup-matrix GEMM (~4.5× the scalar tiled kernel
         # on the M4). Gated by the startup probe; the scalar path below is the
@@ -199,14 +220,9 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(use_bias),
+            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     else:
         # prefill, scalar fallback: 2D register-tiled GEMM, one warp per (CN-column,
         # TM-token) block, so each weight is reused across TM tokens and each X value
@@ -220,16 +236,11 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(use_bias),
+            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
             grid_dim=ceildiv(
                 ceildiv(N, CN) * ceildiv(M, TM) * WARP_SIZE, BLOCK
             ),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     return y^
 
 
@@ -276,61 +287,30 @@ def mm_w(
     var bt = TileTensor(b, row_major(N if use_bias != 0 else 1))
     var yt = TileTensor(y, lay)
     if M == 1:
-        # Shape-routed decode GEMV. The K-split kernel multiplies warps in
-        # flight per row, which is what short-K shapes starve for; long-K rows
-        # (down-proj) already saturate on the one-warp-per-output kernel and
-        # only lose from the extra reduction. Measured M4 (pixi run q4-gemv-mr):
-        # 2048×11008 51.9→92.9 GB/s (R=1 W=4); 2048×2048 1.37× (R=2 W=4);
-        # 11008×2048 stays on the shipping kernel (79.4 GB/s, best there).
-        if K <= 4096 and N >= 4096:
-            comptime kr = matmul_q4_rw_kernel[type_of(lay), 1, 4]
-            cached_enqueue[kr](
-                ctx,
-                xt,
-                pt,
-                st,
-                bt,
-                yt,
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=N,
-                block_dim=4 * WARP_SIZE,
-            )
-        elif K <= 4096 and N >= 1024:
-            comptime kr2 = matmul_q4_rw_kernel[type_of(lay), 2, 4]
-            cached_enqueue[kr2](
-                ctx,
-                xt,
-                pt,
-                st,
-                bt,
-                yt,
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=ceildiv(N, 2),
-                block_dim=8 * WARP_SIZE,
-            )
-        else:
-            comptime k = matmul_q4_kernel[type_of(lay)]
-            cached_enqueue[k](
-                ctx,
-                xt,
-                pt,
-                st,
-                bt,
-                yt,
-                Int32(M),
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-                block_dim=BLOCK,
-            )
+        # Decode GEMV: plain one-warp-per-output. HISTORY: pre-MAX-26.5 this
+        # was shape-routed to K-split rw variants (short-K shapes starved for
+        # warps in flight: 2048×11008 51.9→92.9 GB/s on the old driver).
+        # RE-TUNE 2026-08-07: the 26.5 driver's command-buffer batching gives
+        # that concurrency for free and the split's cross-warp reduction makes
+        # it LOSE at every decode shape (qkv 18→38 GB/s, gate_up 21→47,
+        # lm_head 21→46; .scratch/layer_variants.mojo + lmhead_variants.mojo).
+        # The rw kernels stay in src/kernels for the next driver-era re-tune.
+        comptime k = matmul_q4_kernel[type_of(lay)]
+        cached_enqueue[k](
+            ctx,
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
+            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
     elif M >= SPEC_SMALL_MIN and M <= SPEC_MAX_M and simd_ok:
         # Mid-small M (≈5..8, larger speculative verify): dedicated int4 GEMM with a
         # single 8-row MMA tile — MMA-efficient like the prefill GEMM but without
@@ -343,15 +323,9 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
             grid_dim=(ceildiv(N, _SM_BN), 1),
-            block_dim=_SM_TPB,
-        )
+            block_dim=_SM_TPB)
     elif M <= SPEC_MAX_M:
         # Tiny M (2..4) — or no simdgroup intrinsic: batched GEMV (weights read once,
         # M rows accumulated in registers); cheapest at the smallest batch sizes.
@@ -362,15 +336,9 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
             grid_dim=ceildiv(N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif simd_ok:
         comptime ks = matmul_simd_q4_kernel[type_of(lay)]
         cached_enqueue[ks](
@@ -379,15 +347,9 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     else:
         comptime TM = 8
         comptime CN = 8
@@ -398,17 +360,11 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
             grid_dim=ceildiv(
                 ceildiv(N, CN) * ceildiv(M, TM) * WARP_SIZE, BLOCK
             ),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     return y^
 
 
@@ -457,58 +413,26 @@ def mm_w_add(
         # Shape-routed like mm_w's decode GEMV: short-K rows starve for warps
         # (the o-proj square is the 1.37× case); long-K stays on the shipping
         # kernel, which already saturates there.
-        if K <= 4096 and N >= 4096:
-            comptime kr = matmul_q4_resid_rw_kernel[type_of(lay), 1, 4]
-            cached_enqueue[kr](
-                ctx,
-                TileTensor(x, row_major(M * K)),
-                TileTensor(w.packed, row_major(N * K // 8)),
-                TileTensor(w.scales, row_major(N * NG)),
-                bt,
-                TileTensor(resid, lay),
-                TileTensor(y, lay),
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=N,
-                block_dim=4 * WARP_SIZE,
-            )
-        elif K <= 4096 and N >= 1024:
-            comptime kr2 = matmul_q4_resid_rw_kernel[type_of(lay), 2, 4]
-            cached_enqueue[kr2](
-                ctx,
-                TileTensor(x, row_major(M * K)),
-                TileTensor(w.packed, row_major(N * K // 8)),
-                TileTensor(w.scales, row_major(N * NG)),
-                bt,
-                TileTensor(resid, lay),
-                TileTensor(y, lay),
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=ceildiv(N, 2),
-                block_dim=8 * WARP_SIZE,
-            )
-        else:
-            comptime kq = matmul_q4_resid_kernel[type_of(lay)]
-            cached_enqueue[kq](
-                ctx,
-                TileTensor(x, row_major(M * K)),
-                TileTensor(w.packed, row_major(N * K // 8)),
-                TileTensor(w.scales, row_major(N * NG)),
-                bt,
-                TileTensor(resid, lay),
-                TileTensor(y, lay),
-                Int32(M),
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-                block_dim=BLOCK,
-            )
+        # Decode resid-fused GEMV: plain one-warp-per-output (see the
+        # mm_w_norm re-tune note — K-split loses at decode shapes under the
+        # MAX 26.5 driver).
+        comptime kq = matmul_q4_resid_kernel[type_of(lay)]
+        cached_enqueue[kq](
+            ctx,
+            TileTensor(x, row_major(M * K)),
+            TileTensor(w.packed, row_major(N * K // 8)),
+            TileTensor(w.scales, row_major(N * NG)),
+            bt,
+            TileTensor(resid, lay),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
+            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
     else:
         comptime kb = matmul_resid_kernel[type_of(lay)]
         cached_enqueue[kb](
@@ -517,14 +441,9 @@ def mm_w_add(
             TileTensor(w.bf16, row_major(N * K)),
             bt,
             TileTensor(resid, lay),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(use_bias),
+            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     return y^
 
 
@@ -574,14 +493,9 @@ def mm_norm(
         TileTensor(lnw, row_major(K)),
         TileTensor(w, row_major(N * K)),
         TileTensor(b, row_major(N if use_bias != 0 else 1)),
-        TileTensor(y, lay),
-        Int32(M),
-        Int32(K),
-        Int32(N),
-        Int32(use_bias),
+        TileTensor(y, lay),        Int32(M),        Int32(K),        Int32(N),        Int32(use_bias),
         grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -629,58 +543,31 @@ def mm_w_norm(
     # Shape-routed like mm_w's decode GEMV. The norm-fused GEMV carries decode's
     # qkv AND the merged gate_up — gate_up (K=hidden, N=2·inter) is exactly the
     # short-K/huge-N shape where K-splitting measured 1.79× (92.9 GB/s on M4).
-    if K <= 4096 and N >= 4096:
-        comptime kr = matmul_q4_norm_rw_kernel[type_of(lay), 1, 4]
-        cached_enqueue[kr](
-            ctx,
-            TileTensor(x, row_major(M * K)),
-            TileTensor(lnw, row_major(K)),
-            TileTensor(w.packed, row_major(N * K // 8)),
-            TileTensor(w.scales, row_major(N * NG)),
-            TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=N,
-            block_dim=4 * WARP_SIZE,
-        )
-    elif K <= 4096 and N >= 1024:
-        comptime kr2 = matmul_q4_norm_rw_kernel[type_of(lay), 2, 4]
-        cached_enqueue[kr2](
-            ctx,
-            TileTensor(x, row_major(M * K)),
-            TileTensor(lnw, row_major(K)),
-            TileTensor(w.packed, row_major(N * K // 8)),
-            TileTensor(w.scales, row_major(N * NG)),
-            TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=ceildiv(N, 2),
-            block_dim=8 * WARP_SIZE,
-        )
-    else:
-        comptime k = matmul_q4_norm_kernel[type_of(lay)]
-        cached_enqueue[k](
-            ctx,
-            TileTensor(x, row_major(M * K)),
-            TileTensor(lnw, row_major(K)),
-            TileTensor(w.packed, row_major(N * K // 8)),
-            TileTensor(w.scales, row_major(N * NG)),
-            TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+    # Decode norm-fused GEMV: plain one-warp-per-output. RE-TUNE 2026-08-07
+    # under the MAX 26.5 driver: the K-split rw variants' win was hiding
+    # dispatch gaps, which the driver's command-buffer batching now does for
+    # free, leaving only their cross-warp reduction overhead — plain measured
+    # faster at EVERY decode shape (lm_head N=151936: 3.4 ms vs 7.4; qkv
+    # N=2560: 38 vs 18 GB/s; gate_up N=22016: 47 vs 21 GB/s; benches in
+    # .scratch/lmhead_variants.mojo + layer_variants.mojo). The rw kernels
+    # stay in src/kernels for the next driver-era re-tune.
+    comptime kv_ = matmul_q4_norm_kernel[type_of(lay)]
+    cached_enqueue[kv_](
+        ctx,
+        TileTensor(x, row_major(M * K)),
+        TileTensor(lnw, row_major(K)),
+        TileTensor(w.packed, row_major(N * K // 8)),
+        TileTensor(w.scales, row_major(N * NG)),
+        TileTensor(b, row_major(N if use_bias != 0 else 1)),
+        TileTensor(y, lay),
+        Int32(M),
+        Int32(K),
+        Int32(N),
+        Int32(NG),
+        Int32(use_bias),
+        grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -730,14 +617,9 @@ def mm_w_silu_add(
             TileTensor(w.packed, row_major(N * inter // 8)),
             TileTensor(w.scales, row_major(N * NG)),
             TileTensor(resid, lay),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(inter),
-            Int32(N),
-            Int32(NG),
+            TileTensor(y, lay),            Int32(M),            Int32(inter),            Int32(N),            Int32(NG),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kb = matmul_silu_resid_kernel[type_of(lay)]
         cached_enqueue[kb](
@@ -745,13 +627,9 @@ def mm_w_silu_add(
             TileTensor(gu, row_major(M * 2 * inter)),
             TileTensor(w.bf16, row_major(N * inter)),
             TileTensor(resid, lay),
-            TileTensor(y, lay),
-            Int32(M),
-            Int32(inter),
-            Int32(N),
+            TileTensor(y, lay),            Int32(M),            Int32(inter),            Int32(N),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     return y^
 
 
@@ -790,17 +668,11 @@ def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
         with wb.map_to_host() as h:
             for i in range(N * K):
                 var f = Float32((i * 2) % 5) * 0.5 - 1.0
-                var bits = UnsafePointer(to=f).unsafe_bitcast[UInt32]()[
-                    unsafe_offset=0
-                ]
+                var bits = Pointer(to=f).unsafe_bitcast[UInt32]()[unsafe_offset=0]
                 var top = UInt16(bits >> 16)
                 h[i] = top
                 var re: UInt32 = UInt32(top) << 16
-                hw.append(
-                    UnsafePointer(to=re).unsafe_bitcast[Float32]()[
-                        unsafe_offset=0
-                    ]
-                )
+                hw.append(Pointer(to=re).unsafe_bitcast[Float32]()[unsafe_offset=0])
         var lay = row_major(M * N)
         var xt = TileTensor(xb, row_major(M * K))
         var wt = TileTensor(wb, row_major(N * K))
@@ -812,14 +684,9 @@ def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
             xt,
             wt,
             bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(0),
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
         ctx.synchronize()
         var ok = True
         with yb.map_to_host() as h:
@@ -864,9 +731,7 @@ def rmsnorm(
         ctx,
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
-        TileTensor(y, lay),
-        Int32(T),
-        Int32(dim),
+        TileTensor(y, lay),        Int32(T),        Int32(dim),
         grid_dim=ceildiv(T * WARP_SIZE, BLOCK),
         block_dim=BLOCK,  # one warp per row
     )
@@ -908,13 +773,10 @@ def rmsnorm_add(
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
         TileTensor(resid, lay),
-        TileTensor(y, lay),
-        Int32(T),
-        Int32(dim),
+        TileTensor(y, lay),        Int32(T),        Int32(dim),
         scale,
         grid_dim=ceildiv(T * WARP_SIZE, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -951,14 +813,9 @@ def gelu_mul_strided(
         ctx,
         TileTensor(a, lay),
         TileTensor(p, row_major(T * stride)),
-        TileTensor(y, lay),
-        Int32(T),
-        Int32(n),
-        Int32(stride),
-        Int32(off),
+        TileTensor(y, lay),        Int32(T),        Int32(n),        Int32(stride),        Int32(off),
         grid_dim=ceildiv(T * n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -986,11 +843,9 @@ def add(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),
-        Int32(n),
+        TileTensor(y, lay),        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1018,11 +873,9 @@ def silu_mul(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),
-        Int32(n),
+        TileTensor(y, lay),        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1049,12 +902,9 @@ def silu_mul_cat(
     cached_enqueue[k](
         ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
-        TileTensor(y, lay),
-        Int32(T),
-        Int32(inter),
+        TileTensor(y, lay),        Int32(T),        Int32(inter),
         grid_dim=ceildiv(T * inter, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1081,12 +931,9 @@ def gelu_mul_cat(
     cached_enqueue[k](
         ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
-        TileTensor(y, lay),
-        Int32(T),
-        Int32(inter),
+        TileTensor(y, lay),        Int32(T),        Int32(inter),
         grid_dim=ceildiv(T * inter, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1114,11 +961,9 @@ def gelu_mul(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),
-        Int32(n),
+        TileTensor(y, lay),        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1157,12 +1002,9 @@ def nll_gather(
         ctx,
         TileTensor(logits, row_major(n * vocab)),
         TileTensor(tgt, nlay),
-        TileTensor(out, nlay),
-        Int32(n),
-        Int32(vocab),
+        TileTensor(out, nlay),        Int32(n),        Int32(vocab),
         grid_dim=ceildiv(n * WARP_SIZE, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     ctx.synchronize()
     var res = List[Float32]()
     with out.map_to_host() as m:
@@ -1188,12 +1030,10 @@ def softcap(ctx: DeviceContext, mut x: DevBuf, n: Int, cap: Float32) raises:
     comptime k = softcap_kernel[type_of(lay)]
     cached_enqueue[k](
         ctx,
-        TileTensor(x, lay),
-        Int32(n),
+        TileTensor(x, lay),        Int32(n),
         cap,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
 
 
 def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
@@ -1212,12 +1052,10 @@ def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
     comptime k = add_scalar_kernel[type_of(lay)]
     cached_enqueue[k](
         ctx,
-        TileTensor(x, lay),
-        Int32(n),
+        TileTensor(x, lay),        Int32(n),
         c,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
 
 
 def mul_scalar(
@@ -1243,12 +1081,10 @@ def mul_scalar(
     cached_enqueue[k](
         ctx,
         TileTensor(x, lay),
-        TileTensor(y, lay),
-        Int32(n),
+        TileTensor(y, lay),        Int32(n),
         c,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1286,12 +1122,9 @@ def embed_tokens(
         ctx,
         TileTensor(ids, row_major(T)),
         TileTensor(emb, row_major(vocab * hidden)),
-        TileTensor(h, lay),
-        Int32(T),
-        Int32(hidden),
+        TileTensor(h, lay),        Int32(T),        Int32(hidden),
         grid_dim=ceildiv(T * hidden, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return h^
 
 
@@ -1318,12 +1151,9 @@ def last_row(
     cached_enqueue[k](
         ctx,
         TileTensor(src, row_major(T * dim)),
-        TileTensor(y, lay),
-        Int32((T - 1) * dim),
-        Int32(dim),
+        TileTensor(y, lay),        Int32((T - 1) * dim),        Int32(dim),
         grid_dim=ceildiv(dim, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
     return y^
 
 
@@ -1354,12 +1184,9 @@ def copy_into(
     cached_enqueue[k](
         ctx,
         TileTensor(src, lay),
-        TileTensor(dst, row_major(dst_len)),
-        Int32(dst_offset),
-        Int32(n),
+        TileTensor(dst, row_major(dst_len)),        Int32(dst_offset),        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)
 
 
 def copy_strided(
@@ -1395,12 +1222,6 @@ def copy_strided(
     cached_enqueue[k](
         ctx,
         TileTensor(src, lay),
-        TileTensor(dst, row_major(dst_len)),
-        Int32(T),
-        Int32(in_stride),
-        Int32(in_off),
-        Int32(dst_off),
-        Int32(n),
+        TileTensor(dst, row_major(dst_len)),        Int32(T),        Int32(in_stride),        Int32(in_off),        Int32(dst_off),        Int32(n),
         grid_dim=ceildiv(T * n, BLOCK),
-        block_dim=BLOCK,
-    )
+        block_dim=BLOCK)

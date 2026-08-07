@@ -13,7 +13,7 @@ from std.sys import has_accelerator
 from std.time import perf_counter_ns
 from std.gpu import global_idx, WARP_SIZE
 from std.gpu.primitives.warp import sum as warp_sum
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from layout import TileTensor, TensorLayout, row_major
 from kernels import matmul_kernel
 
@@ -29,10 +29,12 @@ def int8_gemv_kernel[
         DType.float32, LT, MutAnyOrigin
     ],  # per-row (output) scale [N]
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32):
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -61,10 +63,12 @@ def int8x4_gemv_kernel[
     ],  # 4 packed int8 per int32 word
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32):
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -121,13 +125,13 @@ def bench_int8x4(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
     var iters = 200
     for _ in range(5):
         ctx.enqueue_function[k](
-            xt, wt, st, yt, M, K, N, grid_dim=grid, block_dim=BLOCK
+            xt, wt, st, yt, Int32(M), Int32(K), Int32(N), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[k](
-            xt, wt, st, yt, M, K, N, grid_dim=grid, block_dim=BLOCK
+            xt, wt, st, yt, Int32(M), Int32(K), Int32(N), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
@@ -155,13 +159,13 @@ def bench_bf16(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
     var iters = 200
     for _ in range(5):
         ctx.enqueue_function[k](
-            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+            xt, wt, bt, yt, Int32(M), Int32(K), Int32(N), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[k](
-            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+            xt, wt, bt, yt, Int32(M), Int32(K), Int32(N), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
@@ -192,13 +196,13 @@ def bench_int8(
     var iters = 200
     for _ in range(5):
         ctx.enqueue_function[k](
-            xt, wt, st, yt, M, K, N, grid_dim=grid, block_dim=BLOCK
+            xt, wt, st, yt, Int32(M), Int32(K), Int32(N), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[k](
-            xt, wt, st, yt, M, K, N, grid_dim=grid, block_dim=BLOCK
+            xt, wt, st, yt, Int32(M), Int32(K), Int32(N), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6

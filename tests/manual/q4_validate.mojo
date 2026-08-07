@@ -9,7 +9,7 @@ group-128 quantization (a wiring bug would show as far worse top-1 / garbage).
 
 from std.os import getenv
 from std.math import log, exp
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import (
     load_weights,

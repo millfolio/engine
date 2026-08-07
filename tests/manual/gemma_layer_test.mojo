@@ -19,7 +19,7 @@ Build/run:  pixi run gemma-layer-test
 
 from std.sys import has_accelerator
 from std.os.path import exists
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from models.gemma import (
     load_gemma_weights,

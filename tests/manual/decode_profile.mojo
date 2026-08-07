@@ -15,7 +15,7 @@ gates); QWEN_Q4=1-style int4 is forced on since that's the shipping config.
 
 from std.time import perf_counter_ns
 from std.os import getenv
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from std.math import log, exp
 

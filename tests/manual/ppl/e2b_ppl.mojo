@@ -3,7 +3,7 @@ against the HF gemma4-e2b reference (.scratch/e2b_ppl_ref.py). Same ids fed to
 both; if millfolio is flat (no near-0 logprobs on predictable tokens) while HF is
 confident, the shared logprobs/final-norm path is miscalibrated."""
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.math import log
 from models.gemma_e2b import load_e2b_weights
 from runtime.engine import new_session, upload_ids

@@ -17,7 +17,7 @@ branching of behavior."""
 from std.math import ceildiv, sqrt
 from std.os import getenv
 from std.gpu import WARP_SIZE
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
@@ -34,6 +34,7 @@ from kernels import (
     THETA,
 )
 from runtime.tensor_ops import (
+    download_f32,
     BLOCK,
     DevBuf,
     KVBuf,
@@ -282,12 +283,7 @@ struct Weights(ModelWeights, Movable):
             0,
         )
         ctx.synchronize()
-        var out = List[Float32]()
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(self.vocab))
-            for i in range(self.vocab):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, self.vocab)
 
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
@@ -320,12 +316,7 @@ struct Weights(ModelWeights, Movable):
             0,
         )
         ctx.synchronize()
-        var out = List[Float32]()
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(n))
-            for i in range(n):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, n)
 
     def token_logprobs(
         mut self,
@@ -710,48 +701,30 @@ def rope_k(
             ctx,
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(strd),
-            Int32(in_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(strd),            Int32(in_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 1:
         comptime k = rope_k_kernel[type_of(lay), 2, 128, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(strd),
-            Int32(in_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(strd),            Int32(in_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime k = rope_k_kernel[type_of(lay), 2, 64, False, KV_DTYPE]
         cached_enqueue[k](
             ctx,
             TileTensor(kin, lay),
             TileTensor(kc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(strd),
-            Int32(in_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(strd),            Int32(in_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
 
 def rope_kv(
@@ -802,17 +775,10 @@ def rope_kv(
             TileTensor(qkv, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(in_stride),
-            Int32(k_off),
-            Int32(v_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(in_stride),            Int32(k_off),            Int32(v_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 1:
         comptime k = rope_kv_kernel[type_of(lay), 2, 128, False, KV_DTYPE]
         cached_enqueue[k](
@@ -820,17 +786,10 @@ def rope_kv(
             TileTensor(qkv, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(in_stride),
-            Int32(k_off),
-            Int32(v_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(in_stride),            Int32(k_off),            Int32(v_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime k = rope_kv_kernel[type_of(lay), 2, 64, False, KV_DTYPE]
         cached_enqueue[k](
@@ -838,17 +797,10 @@ def rope_kv(
             TileTensor(qkv, lay),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(knw, nlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(in_stride),
-            Int32(k_off),
-            Int32(v_off),
-            THETA,
-            Int32(-1),
+            TileTensor(knw, nlay),            Int32(Tq),            Int32(q_offset),            Int32(in_stride),            Int32(k_off),            Int32(v_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
 
 def attn_cached(
@@ -920,14 +872,9 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(qstr),
-                Int32(q_off),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),                Int32(qstr),                Int32(q_off),
                 grid_dim=Tq * 16,
-                block_dim=4 * WARP_SIZE,
-            )
+                block_dim=4 * WARP_SIZE)
         elif arch == 3:
             comptime k = attn_cached_rope_kw_kernel[
                 type_of(lay), 32, 8, 128, True, 4, KV_DTYPE
@@ -938,14 +885,9 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(qstr),
-                Int32(q_off),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),                Int32(qstr),                Int32(q_off),
                 grid_dim=Tq * 32,
-                block_dim=4 * WARP_SIZE,
-            )
+                block_dim=4 * WARP_SIZE)
         elif arch == 4:
             comptime k = attn_cached_rope_kw_kernel[
                 type_of(lay), 40, 8, 128, True, 4, KV_DTYPE
@@ -956,14 +898,9 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(qstr),
-                Int32(q_off),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),                Int32(qstr),                Int32(q_off),
                 grid_dim=Tq * 40,
-                block_dim=4 * WARP_SIZE,
-            )
+                block_dim=4 * WARP_SIZE)
         elif arch == 1:
             comptime k = attn_cached_rope_kw_kernel[
                 type_of(lay), 16, 2, 128, False, 4, KV_DTYPE
@@ -974,14 +911,9 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(qstr),
-                Int32(q_off),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),                Int32(qstr),                Int32(q_off),
                 grid_dim=Tq * 16,
-                block_dim=4 * WARP_SIZE,
-            )
+                block_dim=4 * WARP_SIZE)
         else:
             comptime k = attn_cached_rope_kw_kernel[
                 type_of(lay), 14, 2, 64, False, 4, KV_DTYPE
@@ -992,14 +924,9 @@ def attn_cached(
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
                 TileTensor(qnw, qnlay),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(qstr),
-                Int32(q_off),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),                Int32(qstr),                Int32(q_off),
                 grid_dim=Tq * 14,
-                block_dim=4 * WARP_SIZE,
-            )
+                block_dim=4 * WARP_SIZE)
         return o^
 
     # PREFILL (or flash decode): rotate Q into a contiguous qr buffer, then attend.
@@ -1011,80 +938,50 @@ def attn_cached(
             ctx,
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(qstr),
-            Int32(q_off),
-            THETA,
-            Int32(-1),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(qstr),            Int32(q_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 3:
         comptime kq = rope_q_kernel[type_of(qlay), 32, 128, True]
         cached_enqueue[kq](
             ctx,
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(qstr),
-            Int32(q_off),
-            THETA,
-            Int32(-1),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(qstr),            Int32(q_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 4:
         comptime kq = rope_q_kernel[type_of(qlay), 40, 128, True]
         cached_enqueue[kq](
             ctx,
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(qstr),
-            Int32(q_off),
-            THETA,
-            Int32(-1),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(qstr),            Int32(q_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 1:
         comptime kq = rope_q_kernel[type_of(qlay), 16, 128, False]
         cached_enqueue[kq](
             ctx,
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(qstr),
-            Int32(q_off),
-            THETA,
-            Int32(-1),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(qstr),            Int32(q_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kq = rope_q_kernel[type_of(qlay), 14, 64, False]
         cached_enqueue[kq](
             ctx,
             TileTensor(q, qslay),
             TileTensor(qr, qlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(qstr),
-            Int32(q_off),
-            THETA,
-            Int32(-1),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(qstr),            Int32(q_off),
+            THETA,            Int32(-1),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
     if arch == 0 and q_offset + Tq > FLASH_THRESHOLD:
         # 0.5B long context: stream K/V through shared memory (bit-identical, no cliff).
@@ -1099,12 +996,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq, FLASH_PW) * hkv,
-            block_dim=nwarp * WARP_SIZE,
-        )
+            block_dim=nwarp * WARP_SIZE)
     elif Tq > 1:
         # PREFILL: tensor-core flash attention on the 8×8 simdgroup-matrix units —
         # one warp per (8-query tile, head). ~27–32× over the scalar attn_cached
@@ -1117,14 +1011,10 @@ def attn_cached(
                 TileTensor(qr, row_major(Tq * q_dim)),
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Float32(-1.0),
-                Int32(0),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),
+                Float32(-1.0),                Int32(0),
                 grid_dim=grid,
-                block_dim=WARP_SIZE,
-            )
+                block_dim=WARP_SIZE)
         elif arch == 3:
             comptime k = tc_attn_kernel[type_of(lay), 32, 8, 128, KV_DTYPE]
             cached_enqueue[k](
@@ -1132,14 +1022,10 @@ def attn_cached(
                 TileTensor(qr, row_major(Tq * q_dim)),
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Float32(-1.0),
-                Int32(0),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),
+                Float32(-1.0),                Int32(0),
                 grid_dim=grid,
-                block_dim=WARP_SIZE,
-            )
+                block_dim=WARP_SIZE)
         elif arch == 4:
             comptime k = tc_attn_kernel[type_of(lay), 40, 8, 128, KV_DTYPE]
             cached_enqueue[k](
@@ -1147,14 +1033,10 @@ def attn_cached(
                 TileTensor(qr, row_major(Tq * q_dim)),
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Float32(-1.0),
-                Int32(0),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),
+                Float32(-1.0),                Int32(0),
                 grid_dim=grid,
-                block_dim=WARP_SIZE,
-            )
+                block_dim=WARP_SIZE)
         elif arch == 1:
             comptime k = tc_attn_kernel[type_of(lay), 16, 2, 128, KV_DTYPE]
             cached_enqueue[k](
@@ -1162,14 +1044,10 @@ def attn_cached(
                 TileTensor(qr, row_major(Tq * q_dim)),
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Float32(-1.0),
-                Int32(0),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),
+                Float32(-1.0),                Int32(0),
                 grid_dim=grid,
-                block_dim=WARP_SIZE,
-            )
+                block_dim=WARP_SIZE)
         else:
             comptime k = tc_attn_kernel[type_of(lay), 14, 2, 64, KV_DTYPE]
             cached_enqueue[k](
@@ -1177,14 +1055,10 @@ def attn_cached(
                 TileTensor(qr, row_major(Tq * q_dim)),
                 TileTensor(kc, row_major(cache_len)),
                 TileTensor(vc, row_major(cache_len)),
-                TileTensor(o, lay),
-                Int32(Tq),
-                Int32(q_offset),
-                Float32(-1.0),
-                Int32(0),
+                TileTensor(o, lay),                Int32(Tq),                Int32(q_offset),
+                Float32(-1.0),                Int32(0),
                 grid_dim=grid,
-                block_dim=WARP_SIZE,
-            )
+                block_dim=WARP_SIZE)
     elif arch == 2:
         # DECODE (Tq=1): warp-per-(query,head), keys split across the 32 lanes.
         comptime k = attn_cached_kernel[type_of(lay), 16, 8, 128, KV_DTYPE]
@@ -1193,12 +1067,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 3:
         comptime k = attn_cached_kernel[type_of(lay), 32, 8, 128, KV_DTYPE]
         cached_enqueue[k](
@@ -1206,12 +1077,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 4:
         comptime k = attn_cached_kernel[type_of(lay), 40, 8, 128, KV_DTYPE]
         cached_enqueue[k](
@@ -1219,12 +1087,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif arch == 1:
         comptime k = attn_cached_kernel[type_of(lay), 16, 2, 128, KV_DTYPE]
         cached_enqueue[k](
@@ -1232,12 +1097,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime k = attn_cached_kernel[type_of(lay), 14, 2, 64, KV_DTYPE]
         cached_enqueue[k](
@@ -1245,12 +1107,9 @@ def attn_cached(
             TileTensor(qr, row_major(Tq * q_dim)),
             TileTensor(kc, row_major(cache_len)),
             TileTensor(vc, row_major(cache_len)),
-            TileTensor(o, lay),
-            Int32(Tq),
-            Int32(q_offset),
+            TileTensor(o, lay),            Int32(Tq),            Int32(q_offset),
             grid_dim=ceildiv(Tq * hq * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     return o^
 
 

@@ -20,10 +20,11 @@ kernels vs a CPU reference and benches GEMV vs bf16.
 from std.math import ceildiv, sqrt
 from std.sys import has_accelerator
 from std.time import perf_counter_ns
-from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
-from std.gpu.memory import AddressSpace
+from std.gpu import global_idx, thread_idx, block_idx, WARP_SIZE
+from max.gpu.sync import barrier
+from max.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.collections import InlineArray
 from std.memory import stack_allocation
 from std.sys.info import external_call
@@ -81,14 +82,18 @@ def q4_gemv_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """Vectorized decode GEMV: one warp per output, each lane consumes one u32
     (8 weights) per step → coalesced 128-byte loads, scale folded per word."""
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var out = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -127,13 +132,17 @@ def q4_simd_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """Matmul_simd_kernel with int4-dequant W-staging; matmul math identical."""
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var tid = thread_idx.x
     var sg = Int(tid) // 32
@@ -340,15 +349,9 @@ def check(
             pt,
             st,
             bt,
-            yt,
-            M,
-            K,
-            N,
-            NG,
-            1,
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(1),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     elif mode == 2:
         comptime k = matmul_q4_batch_kernel[type_of(row_major(1))]
         ctx.enqueue_function[k](
@@ -356,15 +359,9 @@ def check(
             pt,
             st,
             bt,
-            yt,
-            M,
-            K,
-            N,
-            NG,
-            1,
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(1),
             grid_dim=ceildiv(N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif mode == 3:
         comptime k = matmul_q4_small_kernel[type_of(row_major(1))]
         ctx.enqueue_function[k](
@@ -372,15 +369,9 @@ def check(
             pt,
             st,
             bt,
-            yt,
-            M,
-            K,
-            N,
-            NG,
-            1,
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(1),
             grid_dim=(ceildiv(N, _SM_BN), 1),
-            block_dim=_SM_TPB,
-        )
+            block_dim=_SM_TPB)
     else:
         comptime k = q4_gemv_kernel[type_of(row_major(1))]
         ctx.enqueue_function[k](
@@ -388,15 +379,9 @@ def check(
             pt,
             st,
             bt,
-            yt,
-            M,
-            K,
-            N,
-            NG,
-            1,
+            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(1),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     ctx.synchronize()
 
     var got = List[Float32]()
@@ -445,13 +430,13 @@ def bench_speed(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
     comptime kb = matmul_kernel[type_of(row_major(1))]
     for _ in range(5):
         ctx.enqueue_function[kb](
-            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+            xt, wt, bt, yt, Int32(M), Int32(K), Int32(N), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[kb](
-            xt, wt, bt, yt, M, K, N, 0, grid_dim=grid, block_dim=BLOCK
+            xt, wt, bt, yt, Int32(M), Int32(K), Int32(N), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var bf_ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
@@ -465,13 +450,13 @@ def bench_speed(ctx: DeviceContext, name: String, K: Int, N: Int) raises:
     comptime kq = q4_gemv_kernel[type_of(row_major(1))]
     for _ in range(5):
         ctx.enqueue_function[kq](
-            xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var t1 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[kq](
-            xt, pt, st, bt, yt, M, K, N, NG, 0, grid_dim=grid, block_dim=BLOCK
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0), grid_dim=grid, block_dim=BLOCK
         )
     ctx.synchronize()
     var q_ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6

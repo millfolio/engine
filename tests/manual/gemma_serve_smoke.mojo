@@ -7,7 +7,7 @@ server drives, minus flare. Loads the ~7 GB int4 model, so it's a manual test.
   pixi run mojo run -I src -I ../jinja2.mojo/src -I ../flare tests/manual/gemma_serve_smoke.mojo
 """
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma import load_gemma_weights, GemmaWeights, G_NLAYERS
 from runtime.engine import (
     new_session,

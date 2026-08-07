@@ -6,7 +6,7 @@ the output matches the NumPy reference. `pixi run test-attention`.
 """
 
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import attn_cached, rope_k
 from testio import read_f32, upload_f32, max_abs

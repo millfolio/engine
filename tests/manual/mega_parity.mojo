@@ -14,7 +14,7 @@ the delegate: a wrong fusion trips it here instead of silently degrading output.
 """
 
 from std.os import getenv
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import (
     Weights,

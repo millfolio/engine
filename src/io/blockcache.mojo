@@ -25,7 +25,7 @@ memory — a pointer, no copy) + raw file bytes.
 
 from std.os import makedirs, remove
 from std.os.path import exists
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from std.memory import unsafe_memcpy
 
 comptime DevBuf = DeviceBuffer[DType.float32]
@@ -263,9 +263,7 @@ struct BlockCache(Movable):
                 for l in range(self.nlayers):
                     with kcs[l].map_to_host() as h:
                         var p = (
-                            h.unsafe_ptr()
-                            .unsafe_bitcast[UInt8]()
-                            .unsafe_offset(bi * slice_f * 4)
+                            h.unsafe_ptr().unsafe_bitcast[UInt8]().unsafe_offset(bi * slice_f * 4)
                         )
                         f.write_bytes(
                             Span[UInt8, MutUntrackedOrigin](
@@ -274,9 +272,7 @@ struct BlockCache(Movable):
                         )
                     with vcs[l].map_to_host() as h:
                         var p = (
-                            h.unsafe_ptr()
-                            .unsafe_bitcast[UInt8]()
-                            .unsafe_offset(bi * slice_f * 4)
+                            h.unsafe_ptr().unsafe_bitcast[UInt8]().unsafe_offset(bi * slice_f * 4)
                         )
                         f.write_bytes(
                             Span[UInt8, MutUntrackedOrigin](

@@ -11,7 +11,7 @@ flips an argmax across a full prefill + decode. Needs weights + Metal GPU.
 
 from std.sys import argv
 from std.os import getenv
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 
 from model import load_weights, generate, probe_simd_gemm, EOS1, EOS2
 from tokenizer import load_tokenizer

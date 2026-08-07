@@ -6,7 +6,7 @@ correctness signal for the PLE reconstruction: if the text is coherent, the forw
 (PLE setup + per-layer integration + the sliding/full attention geometry) is
 substantially right. `pixi run e2b-smoke`."""
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
 from runtime.engine import (
     new_session,

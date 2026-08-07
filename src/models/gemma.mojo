@@ -27,12 +27,13 @@ transformers' Gemma4 source — the per-layer fixtures are the contract):
 
 from std.math import ceildiv
 from std.gpu import WARP_SIZE
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
 from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
+    download_f32,
     BLOCK,
     DevBuf,
     KVBuf,
@@ -263,12 +264,7 @@ struct GemmaWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, self.vocab, G_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32]()
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(self.vocab))
-            for i in range(self.vocab):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, self.vocab)
 
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
@@ -303,12 +299,7 @@ struct GemmaWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, n, G_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32]()
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(n))
-            for i in range(n):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, n)
 
     def token_logprobs(
         mut self,
@@ -697,32 +688,20 @@ def gemma_attn(
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(0),
-            theta,
-            Int32(rot),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(0),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kq = rope_q_kernel[type_of(qrlay), G_HQ, SL_HEAD_DIM, True]
         cached_enqueue[kq](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(0),
-            theta,
-            Int32(rot),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(0),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
     # K: per-head k_norm + RoPE → cache rows (absolute position).
     var clay = row_major(cache_len)
@@ -735,16 +714,10 @@ def gemma_attn(
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
-            TileTensor(knw, knlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(k_off),
-            theta,
-            Int32(rot),
+            TileTensor(knw, knlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(k_off),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kk = rope_k_kernel[
             type_of(qslay), SL_HKV, SL_HEAD_DIM, True, KV_DTYPE
@@ -753,16 +726,10 @@ def gemma_attn(
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(kc, clay),
-            TileTensor(knw, knlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(k_off),
-            theta,
-            Int32(rot),
+            TileTensor(knw, knlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(k_off),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
     # V: scale-free v_norm → cache rows. Full reuses k_proj output (V=k_proj@k_off);
     # sliding reads the V slice at v_off.
@@ -774,14 +741,9 @@ def gemma_attn(
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
-            TileTensor(vc, clay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(vsrc_off),
+            TileTensor(vc, clay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(vsrc_off),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kv = vnorm_kernel[
             type_of(qslay), SL_HKV, SL_HEAD_DIM, KV_DTYPE
@@ -789,14 +751,9 @@ def gemma_attn(
         cached_enqueue[kv](
             ctx,
             TileTensor(qkv, qslay),
-            TileTensor(vc, clay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(vsrc_off),
+            TileTensor(vc, clay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(vsrc_off),
             grid_dim=ceildiv(Tq * hkv, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
     # Tensor-core causal GQA attention, softmax scale = 1.0 (Gemma).
     var o = ctx.enqueue_create_buffer[DType.float32](Tq * q_dim)
@@ -811,14 +768,10 @@ def gemma_attn(
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
-            TileTensor(o, olay),
-            Int32(Tq),
-            Int32(q_offset),
-            Float32(1.0),
-            Int32(0),
+            TileTensor(o, olay),            Int32(Tq),            Int32(q_offset),
+            Float32(1.0),            Int32(0),
             grid_dim=grid,
-            block_dim=WARP_SIZE,
-        )
+            block_dim=WARP_SIZE)
     else:
         comptime ka = tc_attn_kernel[
             type_of(olay), G_HQ, SL_HKV, SL_HEAD_DIM, KV_DTYPE
@@ -828,14 +781,10 @@ def gemma_attn(
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
-            TileTensor(o, olay),
-            Int32(Tq),
-            Int32(q_offset),
-            Float32(1.0),
-            Int32(G_SLIDING_WINDOW),
+            TileTensor(o, olay),            Int32(Tq),            Int32(q_offset),
+            Float32(1.0),            Int32(G_SLIDING_WINDOW),
             grid_dim=grid,
-            block_dim=WARP_SIZE,
-        )
+            block_dim=WARP_SIZE)
     return o^
 
 

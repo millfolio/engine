@@ -15,7 +15,7 @@ reference continuation, and free-running greedy divergence + decoded text.
 
 from std.os import getenv
 from std.math import sqrt, log, exp
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
 from model import (

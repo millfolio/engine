@@ -2,7 +2,7 @@
 e2b_hf_ref.py). Feeds the SAME raw ids [2,4521,1902] (bf16, no int4) and dumps the
 hidden state after layer 0 + the last-position argmax, to localize the bug."""
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 from models.gemma_e2b import load_e2b_weights, GemmaE2bWeights, E_NLAYERS
 from runtime.engine import new_session, upload_ids, argmax_f

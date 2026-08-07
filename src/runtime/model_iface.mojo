@@ -8,7 +8,7 @@ the generate loop, and sampling, while each family supplies how to embed a
 prompt, run one decoder layer, and produce final logits (incl. any softcap).
 Adding a family = a new weights struct conforming to this trait + its loader."""
 
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from runtime.tensor_ops import DevBuf, KVBuf
 
 # Model-family tags (ModelConfig.family) — the engine is generic, but a few

@@ -16,7 +16,7 @@ Build/run:  pixi run gemma-dump
 
 from std.sys import has_accelerator
 from std.os.path import exists
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
 from models.gemma import load_gemma_weights, G_NLAYERS

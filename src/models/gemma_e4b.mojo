@@ -20,12 +20,13 @@ geometry is validated by greedy COHERENCE (and the shared-code lineage from the
 
 from std.math import ceildiv, sqrt
 from std.gpu import WARP_SIZE
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
 from kernels import rope_q_kernel, rope_k_kernel, tc_attn_kernel, vnorm_kernel
 from runtime.tensor_ops import (
+    download_f32,
     BLOCK,
     DevBuf,
     KVBuf,
@@ -316,12 +317,7 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, self.vocab, E_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32](capacity=self.vocab)
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(self.vocab))
-            for i in range(self.vocab):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, self.vocab)
 
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
@@ -354,12 +350,7 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         )
         softcap(ctx, logits, n, E_FINAL_SOFTCAP)
         ctx.synchronize()
-        var out = List[Float32](capacity=n)
-        with logits.map_to_host() as m:
-            var mt = TileTensor(m, row_major(n))
-            for i in range(n):
-                out.append(rebind[Scalar[DType.float32]](mt[i]))
-        return out^
+        return download_f32(logits, n)
 
     def token_logprobs(
         mut self,
@@ -791,32 +782,20 @@ def e4b_attn(
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(0),
-            theta,
-            Int32(rot),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(0),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     else:
         comptime kq = rope_q_kernel[type_of(qrlay), E_HQ, ESL_HEAD_DIM, True]
         cached_enqueue[kq](
             ctx,
             TileTensor(qkv, qslay),
             TileTensor(qr, qrlay),
-            TileTensor(qnw, qnlay),
-            Int32(Tq),
-            Int32(q_offset),
-            Int32(W),
-            Int32(0),
-            theta,
-            Int32(rot),
+            TileTensor(qnw, qnlay),            Int32(Tq),            Int32(q_offset),            Int32(W),            Int32(0),
+            theta,            Int32(rot),
             grid_dim=ceildiv(Tq * hq, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
 
     var clay = row_major(cache_len)
     var knlay = row_major(head_dim)
@@ -830,16 +809,10 @@ def e4b_attn(
                 ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
-                TileTensor(knw, knlay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(W),
-                Int32(k_off),
-                theta,
-                Int32(rot),
+                TileTensor(knw, knlay),                Int32(Tq),                Int32(q_offset),                Int32(W),                Int32(k_off),
+                theta,                Int32(rot),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
-                block_dim=BLOCK,
-            )
+                block_dim=BLOCK)
         else:
             comptime kk = rope_k_kernel[
                 type_of(qslay), ESL_HKV, ESL_HEAD_DIM, True, KV_DTYPE
@@ -848,16 +821,10 @@ def e4b_attn(
                 ctx,
                 TileTensor(qkv, qslay),
                 TileTensor(kc, clay),
-                TileTensor(knw, knlay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(W),
-                Int32(k_off),
-                theta,
-                Int32(rot),
+                TileTensor(knw, knlay),                Int32(Tq),                Int32(q_offset),                Int32(W),                Int32(k_off),
+                theta,                Int32(rot),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
-                block_dim=BLOCK,
-            )
+                block_dim=BLOCK)
         # V: scale-free v_norm → own cache rows (mirror 12B: Gemma-4 norms V).
         if l_full:
             comptime kv = vnorm_kernel[
@@ -866,14 +833,9 @@ def e4b_attn(
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
-                TileTensor(vc, clay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(W),
-                Int32(v_off),
+                TileTensor(vc, clay),                Int32(Tq),                Int32(q_offset),                Int32(W),                Int32(v_off),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
-                block_dim=BLOCK,
-            )
+                block_dim=BLOCK)
         else:
             comptime kv = vnorm_kernel[
                 type_of(qslay), ESL_HKV, ESL_HEAD_DIM, KV_DTYPE
@@ -881,14 +843,9 @@ def e4b_attn(
             cached_enqueue[kv](
                 ctx,
                 TileTensor(qkv, qslay),
-                TileTensor(vc, clay),
-                Int32(Tq),
-                Int32(q_offset),
-                Int32(W),
-                Int32(v_off),
+                TileTensor(vc, clay),                Int32(Tq),                Int32(q_offset),                Int32(W),                Int32(v_off),
                 grid_dim=ceildiv(Tq * hkv, BLOCK),
-                block_dim=BLOCK,
-            )
+                block_dim=BLOCK)
 
     var o = ctx.enqueue_create_buffer[DType.float32](Tq * q_dim)
     var olay = row_major(Tq * q_dim)
@@ -902,14 +859,10 @@ def e4b_attn(
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
-            TileTensor(o, olay),
-            Int32(Tq),
-            Int32(q_offset),
-            Float32(1.0),
-            Int32(0),
+            TileTensor(o, olay),            Int32(Tq),            Int32(q_offset),
+            Float32(1.0),            Int32(0),
             grid_dim=grid,
-            block_dim=WARP_SIZE,
-        )
+            block_dim=WARP_SIZE)
     else:
         comptime ka = tc_attn_kernel[
             type_of(olay), E_HQ, ESL_HKV, ESL_HEAD_DIM, KV_DTYPE
@@ -919,14 +872,10 @@ def e4b_attn(
             TileTensor(qr, qrlay),
             TileTensor(kc, clay),
             TileTensor(vc, clay),
-            TileTensor(o, olay),
-            Int32(Tq),
-            Int32(q_offset),
-            Float32(1.0),
-            Int32(E_SLIDING_WINDOW),
+            TileTensor(o, olay),            Int32(Tq),            Int32(q_offset),
+            Float32(1.0),            Int32(E_SLIDING_WINDOW),
             grid_dim=grid,
-            block_dim=WARP_SIZE,
-        )
+            block_dim=WARP_SIZE)
     return o^
 
 

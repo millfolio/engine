@@ -2,7 +2,7 @@
 localize where the representation collapses (uniform logits => zero hidden)."""
 
 from std.sys import argv
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.math import sqrt
 from layout import TileTensor, row_major
 from models.qwen import load_weights

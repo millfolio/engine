@@ -22,9 +22,10 @@ from std.math import ceildiv, sqrt
 from std.sys import has_accelerator
 from std.sys.intrinsics import llvm_intrinsic
 from std.time import perf_counter_ns
-from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
-from std.gpu.memory import AddressSpace
-from std.gpu.host import DeviceContext
+from std.gpu import global_idx, thread_idx, block_idx, WARP_SIZE
+from max.gpu.sync import barrier
+from max.gpu.memory import AddressSpace
+from max.gpu.host import DeviceContext
 from std.collections import InlineArray
 from std.memory import stack_allocation
 from layout import TileTensor, TensorLayout, row_major
@@ -76,13 +77,17 @@ def matmul_simd_q4_f16_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """The shipping int4 prefill GEMM with f16 MMA inputs (see module doc)."""
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var tid = Int(thread_idx.x)
     var lane = tid % 32
@@ -198,16 +203,20 @@ def matmul_simd_q4_bk_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    M: Int,
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    M_arg: Int32,
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """The shipping f32-MMA int4 GEMM with the K-block size a parameter: BK=32
     (shipping) barriers 64x per K=2048 sweep; BK=64/128 halve/quarter the
     barrier + staging-loop overhead per FLOP at 2x/4x the shared memory
     (BK*64*4B: 8/16/32 KB — all fit)."""
+    var M = Int(M_arg)
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var tid = Int(thread_idx.x)
     var lane = tid % 32
@@ -417,10 +426,9 @@ def check(ctx: DeviceContext, M: Int, K: Int, N: Int) raises:
 
     comptime k = matmul_simd_q4_f16_kernel[type_of(row_major(1))]
     ctx.enqueue_function[k](
-        xt, pt, st, bt, yt, M, K, N, NG, 1,
+        xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(1),
         grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-        block_dim=SG_TPB,
-    )
+        block_dim=SG_TPB)
     ctx.synchronize()
 
     var md = Float64(0.0)
@@ -476,36 +484,32 @@ def bench(ctx: DeviceContext, M: Int, K: Int, N: Int) raises:
     comptime k32 = matmul_simd_q4_kernel[type_of(row_major(1))]
     for _ in range(3):
         ctx.enqueue_function[k32](
-            xt, pt, st, bt, yt, M, K, N, NG, 0,
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[k32](
-            xt, pt, st, bt, yt, M, K, N, NG, 0,
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     ctx.synchronize()
     var f32ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
 
     comptime k16 = matmul_simd_q4_f16_kernel[type_of(row_major(1))]
     for _ in range(3):
         ctx.enqueue_function[k16](
-            xt, pt, st, bt, yt, M, K, N, NG, 0,
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     ctx.synchronize()
     var t1 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[k16](
-            xt, pt, st, bt, yt, M, K, N, NG, 0,
+            xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+            block_dim=SG_TPB)
     ctx.synchronize()
     var f16ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
     print(
@@ -518,18 +522,16 @@ def bench(ctx: DeviceContext, M: Int, K: Int, N: Int) raises:
         comptime kbk = matmul_simd_q4_bk_kernel[type_of(row_major(1)), BK]
         for _ in range(3):
             ctx.enqueue_function[kbk](
-                xt, pt, st, bt, yt, M, K, N, NG, 0,
+                xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
                 grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-                block_dim=SG_TPB,
-            )
+                block_dim=SG_TPB)
         ctx.synchronize()
         var t2 = perf_counter_ns()
         for _ in range(iters):
             ctx.enqueue_function[kbk](
-                xt, pt, st, bt, yt, M, K, N, NG, 0,
+                xt, pt, st, bt, yt, Int32(M), Int32(K), Int32(N), Int32(NG), Int32(0),
                 grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-                block_dim=SG_TPB,
-            )
+                block_dim=SG_TPB)
         ctx.synchronize()
         var bkms = Float64(perf_counter_ns() - t2) / Float64(iters) / 1.0e6
         print(

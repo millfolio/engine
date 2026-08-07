@@ -38,7 +38,7 @@ def _init_mtps() -> Int64:
     return _UNKNOWN
 
 
-def _cell() raises -> UnsafePointer[Int64, MutUntrackedOrigin]:
+def _cell() raises -> Pointer[Int64, MutUntrackedOrigin]:
     """The process-lifetime decode-rate cell (milli-tok/s, -1 = unknown).
     Type is `_Global.get_or_create_ptr()`'s ResultType (see kernel_cache)."""
     return _Global["millfolio_decode_mtps", _init_mtps].get_or_create_ptr()

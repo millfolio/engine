@@ -6,7 +6,7 @@ silu·mul → matmul) on synthetic + real fixtures (`pixi run kernels-capture`).
 """
 
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from std.os.path import exists
 
 from model import mm, rmsnorm, silu_mul

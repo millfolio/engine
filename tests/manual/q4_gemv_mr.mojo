@@ -28,10 +28,11 @@ shapes. Weight-GB/s = packed bytes / kernel time (the metric decode lives on).
 from std.math import ceildiv
 from std.sys import has_accelerator
 from std.time import perf_counter_ns
-from std.gpu import global_idx, thread_idx, block_idx, barrier, WARP_SIZE
-from std.gpu.memory import AddressSpace
+from std.gpu import global_idx, thread_idx, block_idx, WARP_SIZE
+from max.gpu.sync import barrier
+from max.gpu.memory import AddressSpace
 from std.gpu.primitives.warp import sum as warp_sum
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.collections import InlineArray
 from std.memory import stack_allocation
 from layout import TileTensor, TensorLayout, row_major
@@ -51,11 +52,10 @@ def matmul_q4_mr_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """Decode GEMV (M=1), R output rows per simdgroup.
 
     Per loop step a lane issues R independent 256-bit weight loads (one per
@@ -79,6 +79,10 @@ def matmul_q4_mr_kernel[
         NG: Groups per row (K / Q4_GROUP).
         use_bias: Add B when nonzero.
     """
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var sg = Int(global_idx.x) // WARP_SIZE
     var lane = Int(global_idx.x) % WARP_SIZE
@@ -127,11 +131,10 @@ def matmul_q4_rw_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """Decode GEMV (M=1): R rows × W K-slice warps per threadgroup.
 
     Each threadgroup owns R adjacent output rows; each row gets W warps, each
@@ -159,6 +162,10 @@ def matmul_q4_rw_kernel[
         NG: Groups per row (K / Q4_GROUP).
         use_bias: Add B when nonzero.
     """
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var n0 = Int(block_idx.x) * R
     var wid = Int(thread_idx.x) // WARP_SIZE  # warp within threadgroup
@@ -209,11 +216,10 @@ def matmul_q4_mrw_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """Decode GEMV (M=1): the mr and rw ideas COMPOSED. A threadgroup owns R
     adjacent rows; its W warps each sweep a disjoint K-slice carrying ALL R
     rows — so each x oct is loaded once per warp and reused for R weight
@@ -237,6 +243,10 @@ def matmul_q4_mrw_kernel[
         NG: Groups per row (K / Q4_GROUP).
         use_bias: Add B when nonzero.
     """
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     var n0 = Int(block_idx.x) * R
     var w = Int(thread_idx.x) // WARP_SIZE  # K-slice index (warp id)
@@ -291,11 +301,10 @@ def matmul_q4_qmv_kernel[
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
-    K: Int,
-    N: Int,
-    NG: Int,
-    use_bias: Int,
-):
+    K_arg: Int32,
+    N_arg: Int32,
+    NG_arg: Int32,
+    use_bias_arg: Int32):
     """MLX-qmv-shaped decode GEMV (studied from mlx qmv_fast, MIT): 2 simdgroups
     x 4 rows per threadgroup, NO K-split — each simdgroup sweeps full K for its
     4 rows. Per thread a CONTIGUOUS 16-value K-slice (2 u32/row/iter) loaded
@@ -304,6 +313,10 @@ def matmul_q4_qmv_kernel[
     unsigned in the loop, the -8 folds once per group. 16 | 128 so one scale
     per thread-iteration. Per-lane K-tail guards are plain loads/ALU (no
     divergence around SIMD-group ops)."""
+    var K = Int(K_arg)
+    var N = Int(N_arg)
+    var NG = Int(NG_arg)
+    var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
     comptime RPS = 4  # rows per simdgroup
     comptime VPT = 16  # contiguous K-values per thread per iteration
@@ -462,31 +475,27 @@ def check[
         comptime k = matmul_q4_mr_kernel[type_of(row_major(1)), R]
         var warps = ceildiv(N, R)
         ctx.enqueue_function[k](
-            xt, pt, st, bt, yt, K, N, NG, 1,
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(1),
             grid_dim=ceildiv(warps * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+            block_dim=BLOCK)
     elif MRW == 2:  # qmv-shaped (2 simdgroups × 4 rows, contiguous slices)
         comptime kq2 = matmul_q4_qmv_kernel[type_of(row_major(1))]
         ctx.enqueue_function[kq2](
-            xt, pt, st, bt, yt, K, N, NG, 1,
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(1),
             grid_dim=ceildiv(N, 8),
-            block_dim=2 * WARP_SIZE,
-        )
+            block_dim=2 * WARP_SIZE)
     elif MRW != 0:  # composed: R rows per warp × W K-slices
         comptime k = matmul_q4_mrw_kernel[type_of(row_major(1)), R, W]
         ctx.enqueue_function[k](
-            xt, pt, st, bt, yt, K, N, NG, 1,
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(1),
             grid_dim=ceildiv(N, R),
-            block_dim=W * WARP_SIZE,
-        )
+            block_dim=W * WARP_SIZE)
     else:  # R rows × W K-slice warps per threadgroup
         comptime k = matmul_q4_rw_kernel[type_of(row_major(1)), R, W]
         ctx.enqueue_function[k](
-            xt, pt, st, bt, yt, K, N, NG, 1,
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(1),
             grid_dim=ceildiv(N, R),
-            block_dim=R * W * WARP_SIZE,
-        )
+            block_dim=R * W * WARP_SIZE)
     ctx.synchronize()
 
     var md = Float64(0.0)
@@ -539,16 +548,14 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
     var grid0 = ceildiv(N * WARP_SIZE, BLOCK)
     for _ in range(5):
         ctx.enqueue_function[kq](
-            xt, pt, st, bt, yt, 1, K, N, NG, 0,
-            grid_dim=grid0, block_dim=BLOCK,
-        )
+            xt, pt, st, bt, yt, Int32(1), Int32(K), Int32(N), Int32(NG), Int32(0),
+            grid_dim=grid0, block_dim=BLOCK)
     ctx.synchronize()
     var t0 = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[kq](
-            xt, pt, st, bt, yt, 1, K, N, NG, 0,
-            grid_dim=grid0, block_dim=BLOCK,
-        )
+            xt, pt, st, bt, yt, Int32(1), Int32(K), Int32(N), Int32(NG), Int32(0),
+            grid_dim=grid0, block_dim=BLOCK)
     ctx.synchronize()
     var ship_ms = Float64(perf_counter_ns() - t0) / Float64(iters) / 1.0e6
     print(
@@ -563,16 +570,14 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
         var grid = ceildiv(warps * WARP_SIZE, BLOCK)
         for _ in range(5):
             ctx.enqueue_function[km](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=BLOCK,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=BLOCK)
         ctx.synchronize()
         var t1 = perf_counter_ns()
         for _ in range(iters):
             ctx.enqueue_function[km](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=BLOCK,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=BLOCK)
         ctx.synchronize()
         var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
         print(
@@ -589,16 +594,14 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
         var tpb = RR * WW * WARP_SIZE
         for _ in range(5):
             ctx.enqueue_function[kw](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=tpb,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=tpb)
         ctx.synchronize()
         var t1 = perf_counter_ns()
         for _ in range(iters):
             ctx.enqueue_function[kw](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=tpb,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=tpb)
         ctx.synchronize()
         var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
         print(
@@ -611,16 +614,14 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
     var gq = ceildiv(N, 8)
     for _ in range(5):
         ctx.enqueue_function[kqmv](
-            xt, pt, st, bt, yt, K, N, NG, 0,
-            grid_dim=gq, block_dim=2 * WARP_SIZE,
-        )
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+            grid_dim=gq, block_dim=2 * WARP_SIZE)
     ctx.synchronize()
     var tq = perf_counter_ns()
     for _ in range(iters):
         ctx.enqueue_function[kqmv](
-            xt, pt, st, bt, yt, K, N, NG, 0,
-            grid_dim=gq, block_dim=2 * WARP_SIZE,
-        )
+            xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+            grid_dim=gq, block_dim=2 * WARP_SIZE)
     ctx.synchronize()
     var msq = Float64(perf_counter_ns() - tq) / Float64(iters) / 1.0e6
     print(
@@ -637,16 +638,14 @@ def bench(ctx: DeviceContext, K: Int, N: Int) raises:
         var tpb = WW * WARP_SIZE
         for _ in range(5):
             ctx.enqueue_function[kc](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=tpb,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=tpb)
         ctx.synchronize()
         var t1 = perf_counter_ns()
         for _ in range(iters):
             ctx.enqueue_function[kc](
-                xt, pt, st, bt, yt, K, N, NG, 0,
-                grid_dim=grid, block_dim=tpb,
-            )
+                xt, pt, st, bt, yt, Int32(K), Int32(N), Int32(NG), Int32(0),
+                grid_dim=grid, block_dim=tpb)
         ctx.synchronize()
         var ms = Float64(perf_counter_ns() - t1) / Float64(iters) / 1.0e6
         print(

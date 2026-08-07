@@ -6,7 +6,7 @@ chained-hash determinism and the token-id collision guard. Needs the GPU (uses
 map_to_host), so it lives with the engine, not the pure-Python suite.
 """
 
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from model import BlockCache
 
 comptime DevBuf = DeviceBuffer[DType.float32]

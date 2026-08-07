@@ -9,7 +9,7 @@ kernel while passing the ~2e-6 numerical drift. `pixi run test-simd-gemm`.
 """
 
 from std.sys import has_accelerator
-from std.gpu.host import DeviceContext, DeviceBuffer
+from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
 from model import mm, probe_simd_gemm
