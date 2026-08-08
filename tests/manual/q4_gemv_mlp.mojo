@@ -34,7 +34,7 @@ from max.gpu.host import DeviceContext, DeviceBuffer
 from std.collections import InlineArray
 from std.memory import stack_allocation
 from layout import TileTensor, TensorLayout, row_major
-from kernels import matmul_q4_mrw_kernel, Q4_GROUP, Q4_SHIFT
+from kernels import matmul_q4_mrw_kernel, matmul_q4_kernel, Q4_GROUP, Q4_SHIFT
 
 comptime _SHIFTS = SIMD[DType.uint32, 8](0, 4, 8, 12, 16, 20, 24, 28)
 comptime LayT = type_of(row_major(1))
@@ -385,6 +385,7 @@ comptime VVA = 1
 comptime VPF = 2
 comptime VVP = 3
 comptime VW16 = 4
+comptime VPLAIN = 5  # production plain GEMV (one warp per output; qkv/o path)
 
 
 def launch[
@@ -397,7 +398,23 @@ def launch[
     var bt = TileTensor(b.bb, row_major(N))
     var yt = TileTensor(b.yb, row_major(N))
     var grid = ceildiv(N, R)
-    comptime if VAR == VMRW:
+    comptime if VAR == VPLAIN:
+        comptime k = matmul_q4_kernel[LayT]
+        ctx.enqueue_function[k](
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(1),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(1),
+            grid_dim=ceildiv(N * WARP_SIZE, 256),
+            block_dim=256,
+        )
+    elif VAR == VMRW:
         comptime k = matmul_q4_mrw_kernel[LayT, R, W]
         ctx.enqueue_function[k](
             xt,
@@ -550,15 +567,18 @@ def bench_shape(ctx: DeviceContext, label: String, K: Int, N: Int) raises:
     var scales = List[Float32](length=N * NG, fill=0.008)
     var Bh = List[Float32](length=N, fill=0.0)
     var b = upload(ctx, Xh, packed, scales, Bh, K, N)
-    bench[VMRW, 2, 4](ctx, "mrw[2,4] (ship)", b, K, N)
-    bench[VMRW, 4, 4](ctx, "mrw[4,4]       ", b, K, N)
-    bench[VMRW, 8, 4](ctx, "mrw[8,4]       ", b, K, N)
-    bench[VVA, 4, 4](ctx, "va [4,4]       ", b, K, N)
-    bench[VPF, 4, 4](ctx, "pf [4,4]       ", b, K, N)
-    bench[VVP, 4, 4](ctx, "vp [4,4]       ", b, K, N)
-    bench[VVP, 8, 4](ctx, "vp [8,4]       ", b, K, N)
-    bench[VW16, 4, 4](ctx, "w16[4,4]       ", b, K, N)
-    bench[VW16, 8, 4](ctx, "w16[8,4]       ", b, K, N)
+    bench[VPLAIN, 1, 1](ctx, "plain (prod qkv/o)", b, K, N)
+    bench[VMRW, 2, 4](ctx, "mrw[2,4] (ship)   ", b, K, N)
+    bench[VMRW, 2, 1](ctx, "mrw[2,1]          ", b, K, N)
+    bench[VMRW, 2, 2](ctx, "mrw[2,2]          ", b, K, N)
+    bench[VMRW, 4, 1](ctx, "mrw[4,1]          ", b, K, N)
+    bench[VMRW, 4, 2](ctx, "mrw[4,2]          ", b, K, N)
+    bench[VMRW, 4, 4](ctx, "mrw[4,4]          ", b, K, N)
+    bench[VMRW, 8, 4](ctx, "mrw[8,4]          ", b, K, N)
+    bench[VVA, 4, 1](ctx, "va [4,1]          ", b, K, N)
+    bench[VVA, 4, 4](ctx, "va [4,4]          ", b, K, N)
+    bench[VVP, 4, 4](ctx, "vp [4,4]          ", b, K, N)
+    bench[VW16, 4, 4](ctx, "w16[4,4]          ", b, K, N)
 
 
 def main() raises:
@@ -571,6 +591,9 @@ def main() raises:
     check[VVP, 8, 4](ctx, "vp [8,4]", 384, 37)
     check[VW16, 4, 4](ctx, "w16[4,4]", 1280, 130)
     check[VW16, 8, 4](ctx, "w16[8,4]", 384, 37)
+    check[VMRW, 4, 1](ctx, "mrw[4,1]", 1280, 130)
+    check[VMRW, 2, 2](ctx, "mrw[2,2]", 384, 37)
+    check[VPLAIN, 1, 1](ctx, "plain   ", 384, 37)
     print("bench (Qwen2.5-3B decode shapes + lm_head):")
     bench_shape(ctx, "qkv    ", 2048, 2560)
     bench_shape(ctx, "o_proj ", 2048, 2048)

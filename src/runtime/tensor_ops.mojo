@@ -319,30 +319,44 @@ def mm_w(
     var bt = TileTensor(b, row_major(N if use_bias != 0 else 1))
     var yt = TileTensor(y, lay)
     if M == 1:
-        # Decode GEMV: plain one-warp-per-output. HISTORY: pre-MAX-26.5 this
-        # was shape-routed to K-split rw variants (short-K shapes starved for
-        # warps in flight: 2048×11008 51.9→92.9 GB/s on the old driver).
-        # RE-TUNE 2026-08-07: the 26.5 driver's command-buffer batching gives
-        # that concurrency for free and the split's cross-warp reduction makes
-        # it LOSE at every decode shape (qkv 18→38 GB/s, gate_up 21→47,
-        # lm_head 21→46; .scratch/layer_variants.mojo + lmhead_variants.mojo).
-        # The rw kernels stay in src/kernels for the next driver-era re-tune.
-        comptime k = matmul_q4_kernel[type_of(lay)]
-        cached_enqueue[k](
-            ctx,
-            xt,
-            pt,
-            st,
-            bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK,
-        )
+        # Decode GEMV. HISTORY: pre-MAX-26.5 = K-split rw; RE-TUNE 2026-08-07
+        # = plain everywhere; RE-ROUTE 2026-08-08 (gemv-mlp-race, M4): at
+        # short K the plain kernel is issue-limited (o_proj 48 GB/s) and mrw
+        # wins (67); at long K (down 11008) plain streams best (79 vs 68) —
+        # route on K. The rw kernels stay in src/kernels for the next re-tune.
+        if K <= 4096 and N >= 2048:
+            comptime kmr = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+            cached_enqueue[kmr](
+                ctx,
+                xt,
+                pt,
+                st,
+                bt,
+                yt,
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=ceildiv(N, 2),
+                block_dim=4 * WARP_SIZE,
+            )
+        else:
+            comptime k = matmul_q4_kernel[type_of(lay)]
+            cached_enqueue[k](
+                ctx,
+                xt,
+                pt,
+                st,
+                bt,
+                yt,
+                Int32(M),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+                block_dim=BLOCK,
+            )
     elif M >= SPEC_SMALL_MIN and M <= SPEC_MAX_M and simd_ok:
         # Mid-small M (≈5..8, larger speculative verify): dedicated int4 GEMM with a
         # single 8-row MMA tile — MMA-efficient like the prefill GEMM but without
@@ -699,29 +713,49 @@ def mm_w_norm(
     # N=2560: 38 vs 18 GB/s; gate_up N=22016: 47 vs 21 GB/s; benches in
     # .scratch/lmhead_variants.mojo + layer_variants.mojo). The rw kernels
     # stay in src/kernels for the next driver-era re-tune.
-    if N >= 4096:
-        # Big-N decode (gate_up, LM head): UNFUSED mrw streams real weights at
-        # ~90 GB/s vs the plain kernel's ~35; folding the norm INTO the mrw
-        # loop costs 2.2x (extra x-side streams serialize its load pipeline),
-        # so RMSNorm runs as its own tiny launch (~0.14 ms) instead.
+    if N >= 2048:
+        # Decode norm+GEMV: UNFUSED mrw (RMSNorm as its own tiny launch —
+        # folding it into the mrw loop costs 2.2x). RE-ROUTE 2026-08-08
+        # (gemv-mlp-race, M4): the July "qkv/o are launch-latency-bound,
+        # plain wins" finding is WRONG under the batching driver — plain
+        # runs qkv at 28 GB/s vs mrw[4,4]'s 68. R is shape-dependent:
+        # R=4 wins the small-N shapes (qkv 68 vs 58 at R=2), R=2 wins the
+        # big-N ones (gate_up 94 vs 84, lm_head 92 vs 90).
         var xn = rmsnorm(ctx, x, lnw, M, K)
-        comptime km = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
-        cached_enqueue[km](
-            ctx,
-            TileTensor(xn, row_major(M * K)),
-            TileTensor(w.packed, row_major(N * K // 8)),
-            TileTensor(w.scales, row_major(N * NG)),
-            TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=ceildiv(N, 2),
-            block_dim=4 * WARP_SIZE,
-        )
+        if N >= 8192:
+            comptime km = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+            cached_enqueue[km](
+                ctx,
+                TileTensor(xn, row_major(M * K)),
+                TileTensor(w.packed, row_major(N * K // 8)),
+                TileTensor(w.scales, row_major(N * NG)),
+                TileTensor(b, row_major(N if use_bias != 0 else 1)),
+                TileTensor(y, lay),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=ceildiv(N, 2),
+                block_dim=4 * WARP_SIZE,
+            )
+        else:
+            comptime km4 = matmul_q4_mrw_kernel[type_of(lay), 4, 4]
+            cached_enqueue[km4](
+                ctx,
+                TileTensor(xn, row_major(M * K)),
+                TileTensor(w.packed, row_major(N * K // 8)),
+                TileTensor(w.scales, row_major(N * NG)),
+                TileTensor(b, row_major(N if use_bias != 0 else 1)),
+                TileTensor(y, lay),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=ceildiv(N, 4),
+                block_dim=4 * WARP_SIZE,
+            )
     else:
-        # Small-N decode (qkv, o): launch-latency-bound — plain wins.
+        # Tiny-N decode: norm-fused plain GEMV.
         comptime kv_ = matmul_q4_norm_kernel[type_of(lay)]
         cached_enqueue[kv_](
             ctx,
@@ -783,7 +817,12 @@ def mm_w_silu_add(
         # Long-K down-proj: UNFUSED mrw streams real weights at ~72 GB/s vs
         # ~35 plain; the SwiGLU folds cost 2.2x inside mrw's load pipeline,
         # so silu(gate)·up runs as its own tiny launch and the residual rides
-        # the mrw kernel's bias input (exact: bias is += B[n]).
+        # the mrw kernel's bias input (exact: bias is += B[n]). NOTE
+        # 2026-08-08: the isolated gemv-mlp-race shows plain at 79 GB/s vs
+        # mrw's 68 here on M4, but the CHAIN is launch-latency-bound there
+        # (routing changes measured chain-neutral) and down is the M2 Pro's
+        # one bandwidth-healthy shape on mrw — kept on mrw pending the M2
+        # race's plain column.
         var NG = inter // Q4_GROUP
         var act = silu_mul_cat(ctx, gu, M, inter)
         comptime kq = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
