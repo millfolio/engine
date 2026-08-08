@@ -141,6 +141,10 @@ q4-gemv-mr = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mr.mojo 
 decode-profile = { cmd = "mkdir -p build && mojo build tests/manual/decode_profile.mojo -I src -I ../jinja2.mojo/src -o build/decode_profile && ./build/decode_profile" }
 mega-parity = { cmd = "mkdir -p build && mojo build tests/manual/mega_parity.mojo -I src -I ../jinja2.mojo/src -o build/mega_parity && ./build/mega_parity" }
 q4-gemm-f16 = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemm_f16.mojo -I src -o build/q4_gemm_f16 && ./build/q4_gemm_f16" }
+# Prefill-GEMM operand-dtype race (f32/bf16/f16) — per-machine: decides the
+# dequant-scratch dtype (bf16 suspected emulated/slow on pre-M3 GPUs, f16
+# native since M1). GPU only, no weights.
+gemm-dtype-race = { cmd = "mkdir -p build && mojo build tests/manual/gemm_dtype_race.mojo -I src -o build/gemm_dtype_race && ./build/gemm_dtype_race" }
 q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../jinja2.mojo/src -o build/q4_validate && ./build/q4_validate" }
 int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../jinja2.mojo/src -o build/int4_quality && ./build/int4_quality" }
 # End-to-end Gemma serving-path smoke test (template -> tokenizer -> persistent
