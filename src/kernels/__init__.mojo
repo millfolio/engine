@@ -656,18 +656,23 @@ def matmul_simd_kernel[
 
 
 @always_inline
-def _mma8x8_bf16(
-    a: SIMD[DType.bfloat16, _FRAG8],
-    b: SIMD[DType.bfloat16, _FRAG8],
+def _mma8x8_h[
+    T: DType = DType.float16
+](
+    a: SIMD[T, _FRAG8],
+    b: SIMD[T, _FRAG8],
     c: SIMD[DType.float32, _FRAG8],
 ) -> SIMD[DType.float32, _FRAG8]:
-    """One 8×8×8 MMA with bf16 operands, f32 accumulate: D = A·B + C.
-    Vec2-bf16 fragments emit a `.v2bf16` AIR form that M1/M2 misread as fp16;
-    widening to 64 lanes forces the `.v64bf16` form MSL emits, and air-lld
-    collapses the sparse vector back to the per-lane fragment (perf-neutral —
-    Modular's workaround, see stdlib `_mma_apple_8x8`)."""
-    var a_wide = SIMD[DType.bfloat16, 64](0)
-    var b_wide = SIMD[DType.bfloat16, 64](0)
+    """One 8×8×8 MMA with half-precision operands (f16/bf16), f32 accumulate:
+    D = A·B + C. Compact vec2 half fragments emit AIR forms that M1/M2
+    mishandle; widening to 64 lanes forces the `.v64` form MSL emits, and
+    air-lld collapses the sparse vector back to the per-lane fragment
+    (perf-neutral — Modular's workaround, see stdlib `_mma_apple_8x8`).
+    Default f16: bf16 MMA measured ~20% SLOWER on M2-generation GPUs while
+    f16 == bf16 on M4 (`pixi run gemm-dtype-race`, 2026-08-08)."""
+    comptime assert T == DType.float16 or T == DType.bfloat16
+    var a_wide = SIMD[T, 64](0)
+    var b_wide = SIMD[T, 64](0)
     var c_wide = SIMD[DType.float32, 64](0)
     comptime for s in range(_FRAG8):
         a_wide[s] = a[s]
@@ -683,11 +688,11 @@ def _mma8x8_bf16(
     return d
 
 
-def matmul_bf16kn_kernel[
-    LT: TensorLayout, WIDE: Bool = False
+def matmul_hkn_kernel[
+    LT: TensorLayout, WIDE: Bool = False, T: DType = DType.float16
 ](
-    X: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
-    W: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
+    X: TileTensor[T, LT, MutAnyOrigin],
+    W: TileTensor[T, LT, MutAnyOrigin],
     B: TileTensor[DType.float32, LT, MutAnyOrigin],
     Y: TileTensor[DType.float32, LT, MutAnyOrigin],
     M_arg: Int32,
@@ -695,7 +700,7 @@ def matmul_bf16kn_kernel[
     N_arg: Int32,
     use_bias_arg: Int32,
 ):
-    """Y[M,N] = X[M,K]·W[K,N] (+bias) with bf16 operands and f32 accumulate.
+    """Y[M,N] = X[M,K]·W[K,N] (+bias), half-precision operands (T), f32 accumulate.
 
     W is NON-transposed [K,N] (the dequant-scratch layout) so B-side fragment
     loads are contiguous 2-wide vector loads — the [N,K] transposed gather
@@ -709,10 +714,11 @@ def matmul_bf16kn_kernel[
     Parameters:
         LT: Tensor layout type for the flat 1D buffers.
         WIDE: 32×128 block geometry instead of 64×64 (for odd ceildiv(M,32)).
+        T: Operand dtype (f16 default; bf16 slow on M2-gen GPUs).
 
     Args:
-        X: Input activations [M, K] (bf16, pre-cast by `cast_f32_bf16_kernel`).
-        W: Dequantized weights [K, N] (bf16, from `dequant_q4_bf16t_kernel`).
+        X: Input activations [M, K] (half, pre-cast by `cast_f32_h_kernel`).
+        W: Dequantized weights [K, N] (half, from `dequant_q4_ht_kernel`).
         B: Bias [N] (f32), added when use_bias != 0.
         Y: Output [M, N] (f32).
         M: Number of input rows (tokens).
@@ -757,9 +763,7 @@ def matmul_bf16kn_kernel[
         var kk = ks * _MMA8
         # A (X) is bf16 [M,K] row-major: lane's 2 frag elems are consecutive K
         # cols kk+fcol, kk+fcol+1 (always in-bounds in K).
-        var afrag = InlineArray[SIMD[DType.bfloat16, _FRAG8], _SG_NTM](
-            uninitialized=True
-        )
+        var afrag = InlineArray[SIMD[T, _FRAG8], _SG_NTM](uninitialized=True)
         comptime for mi in range(_SG_NTM):
             var grow = row_base + mi * _MMA8 + frow
             if interior or grow < M:
@@ -767,13 +771,11 @@ def matmul_bf16kn_kernel[
                     width=_FRAG8
                 ]()
             else:
-                afrag[mi] = SIMD[DType.bfloat16, _FRAG8](0)
+                afrag[mi] = SIMD[T, _FRAG8](0)
         # B (W) is bf16 [K,N]: B[k_idx, j] = W[k_idx*N + j]; frag slots are
         # consecutive j → one 2-wide vector load. Col needs an N bound on
         # edge subtiles; the K row is always in-bounds.
-        var bfrag = InlineArray[SIMD[DType.bfloat16, _FRAG8], _SG_NTN](
-            uninitialized=True
-        )
+        var bfrag = InlineArray[SIMD[T, _FRAG8], _SG_NTN](uninitialized=True)
         comptime for ni in range(_SG_NTN):
             var krow = kk + frow
             var gj = col_base + ni * _MMA8 + fcol
@@ -782,13 +784,13 @@ def matmul_bf16kn_kernel[
                     width=_FRAG8
                 ]()
             else:
-                var bf = SIMD[DType.bfloat16, _FRAG8](0)
+                var bf = SIMD[T, _FRAG8](0)
                 if gj < N:
                     bf[0] = wp[unsafe_offset=krow * N + gj]
                 bfrag[ni] = bf
         comptime for mi in range(_SG_NTM):
             comptime for ni in range(_SG_NTN):
-                acc[mi * _SG_NTN + ni] = _mma8x8_bf16(
+                acc[mi * _SG_NTN + ni] = _mma8x8_h[T](
                     afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
                 )
 
@@ -805,17 +807,18 @@ def matmul_bf16kn_kernel[
                     Y[grow * N + gcol] = rebind[Y.ElementType](v)
 
 
-def dequant_q4_bf16t_kernel[
-    LT: TensorLayout
+def dequant_q4_ht_kernel[
+    LT: TensorLayout, T: DType = DType.float16
 ](
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
     S: TileTensor[DType.float32, LT, MutAnyOrigin],
-    W2: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
+    W2: TileTensor[T, LT, MutAnyOrigin],
     K_arg: Int32,
     N_arg: Int32,
     NG_arg: Int32,
 ):
-    """Dequantize group-128 int4 [N,K] into a TRANSPOSED bf16 [K,N] scratch.
+    """Dequantize group-128 int4 [N,K] into a TRANSPOSED half-precision (T)
+    [K,N] scratch. Default f16: bf16 measured ~20% slower on M2-gen GPUs.
 
     Thread (x=n, y=kw) unpacks one packed u32 = 8 K-consecutive nibbles of
     weight row n ((nib−8)·scale, same contract as `q4_deq`); the 8 stores are
@@ -828,7 +831,7 @@ def dequant_q4_bf16t_kernel[
     Args:
         P: Packed int4 weights (u32, 8 nibbles/word) for [N, K].
         S: Per-group f32 scales [N, NG].
-        W2: Output bf16 scratch, [K, N] row-major.
+        W2: Output half-precision scratch (T), [K, N] row-major.
         K: Contraction dimension (multiple of 128).
         N: Number of output channels.
         NG: Groups per row (K / Q4_GROUP).
@@ -849,20 +852,20 @@ def dequant_q4_bf16t_kernel[
     var s = sp[unsafe_offset=n * NG + g]
     var nibs = (SIMD[DType.uint32, 8](word) >> _Q4_SHIFTS) & 0xF
     var qf = (nibs.cast[DType.int32]() - 8).cast[DType.float32]() * s
-    var wf = qf.cast[DType.bfloat16]()
+    var wf = qf.cast[T]()
     var k0 = kw * 8
     comptime for j in range(8):
         wp[unsafe_offset=(k0 + j) * N + n] = wf[j]
 
 
-def cast_f32_bf16_kernel[
-    LT: TensorLayout
+def cast_f32_h_kernel[
+    LT: TensorLayout, T: DType = DType.float16
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
-    Y: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
+    Y: TileTensor[T, LT, MutAnyOrigin],
     n_arg: Int32,
 ):
-    """Elementwise f32 → bf16 (round-to-nearest-even), 4 elements per thread.
+    """Elementwise f32 → T (f16 default; round-to-nearest-even), 4 per thread.
     Launch: grid=ceildiv(ceildiv(n,4), BLOCK), block_dim=BLOCK.
 
     Parameters:
@@ -870,7 +873,7 @@ def cast_f32_bf16_kernel[
 
     Args:
         X: Source f32 buffer [n].
-        Y: Destination bf16 buffer [n].
+        Y: Destination half-precision buffer (T) [n].
         n: Element count.
     """
     var n = Int(n_arg)
@@ -882,12 +885,12 @@ def cast_f32_bf16_kernel[
     var yp = Y.ptr
     if i + 4 <= n:
         var v = xp.unsafe_offset(i).unsafe_load[width=4]()
-        var w = v.cast[DType.bfloat16]()
+        var w = v.cast[T]()
         comptime for s in range(4):
             yp[unsafe_offset=i + s] = w[s]
     else:
         for j in range(i, n):
-            yp[unsafe_offset=j] = xp[unsafe_offset=j].cast[DType.bfloat16]()
+            yp[unsafe_offset=j] = xp[unsafe_offset=j].cast[T]()
 
 
 # ── group-128 int4 weights (opt-in, e.g. for the 3B) ──────────────────────────

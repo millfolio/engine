@@ -28,9 +28,9 @@ from kernels import (
     matmul_q4_small_kernel,
     matmul_simd_q4_kernel,
     matmul_tiled_q4_kernel,
-    matmul_bf16kn_kernel,
-    dequant_q4_bf16t_kernel,
-    cast_f32_bf16_kernel,
+    matmul_hkn_kernel,
+    dequant_q4_ht_kernel,
+    cast_f32_h_kernel,
     matmul_resid_kernel,
     matmul_q4_resid_kernel,
     matmul_norm_kernel,
@@ -71,7 +71,7 @@ comptime BLOCK = 256
 """Default GPU threads-per-block for the 1D op launches."""
 
 comptime DQ_MIN_M = 128
-"""Minimum M to route prefill through the dequant-once bf16 GEMM. Below this
+"""Minimum M to route prefill through the dequant-once half-precision GEMM. Below this
 the fused int4 GEMM wins: dequant-once pays ~4.5× the weight bytes (0.5 read +
 2 write + 2 re-read vs 0.5 fused), which only amortizes once the GEMM is
 firmly compute-bound. Crossover re-measured post-ktail-fix on M4
@@ -384,16 +384,16 @@ def mm_w(
             block_dim=BLOCK,
         )
     elif simd_ok and M >= DQ_MIN_M:
-        # Large-M prefill: dequant-once bf16 pipeline (MAX linalg bake-off
+        # Large-M prefill: dequant-once half-precision pipeline (MAX linalg bake-off
         # 2026-08-07 — bf16 MMA operands + contiguous [K,N] B-side vector
         # loads reach ~3.0 TFLOP/s effective incl. the dequant + X cast, vs
         # 2.15 for the fused int4 GEMM below; +37% at M=1570). Scratch is
         # transient per call (stream-ordered free; largest = gate_up 90 MB).
-        var wdq = ctx.enqueue_create_buffer[DType.bfloat16](K * N)
-        var xb = ctx.enqueue_create_buffer[DType.bfloat16](M * K)
+        var wdq = ctx.enqueue_create_buffer[DType.float16](K * N)
+        var xb = ctx.enqueue_create_buffer[DType.float16](M * K)
         var wdt = TileTensor(wdq, row_major(K * N))
         var xbt = TileTensor(xb, row_major(M * K))
-        comptime kd = dequant_q4_bf16t_kernel[type_of(lay)]
+        comptime kd = dequant_q4_ht_kernel[type_of(lay)]
         cached_enqueue[kd](
             ctx,
             pt,
@@ -405,7 +405,7 @@ def mm_w(
             grid_dim=(ceildiv(N, 32), ceildiv(K // 8, 4)),
             block_dim=(32, 4),
         )
-        comptime kc = cast_f32_bf16_kernel[type_of(lay)]
+        comptime kc = cast_f32_h_kernel[type_of(lay)]
         cached_enqueue[kc](
             ctx,
             xt,
@@ -418,7 +418,7 @@ def mm_w(
         # edge waste (bit-identical; 5-16% on 87-250-token suffixes/chunks,
         # neutral on even parity — small-M race 2026-08-08).
         if (ceildiv(M, 32) & 1) == 1:
-            comptime kgw = matmul_bf16kn_kernel[type_of(lay), True]
+            comptime kgw = matmul_hkn_kernel[type_of(lay), True]
             cached_enqueue[kgw](
                 ctx,
                 xbt,
@@ -433,7 +433,7 @@ def mm_w(
                 block_dim=SG_TPB,
             )
         else:
-            comptime kg = matmul_bf16kn_kernel[type_of(lay)]
+            comptime kg = matmul_hkn_kernel[type_of(lay)]
             cached_enqueue[kg](
                 ctx,
                 xbt,
