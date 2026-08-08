@@ -711,7 +711,8 @@ def matmul_bf16kn_kernel[
         B: Bias [N] (f32), added when use_bias != 0.
         Y: Output [M, N] (f32).
         M: Number of input rows (tokens).
-        K: Contraction (input) dimension.
+        K: Contraction dimension — MUST be a multiple of 8 (guaranteed by the
+            group-128 dequant contract, K % 128 == 0).
         N: Number of output channels.
         use_bias: Add B when nonzero.
     """
@@ -736,47 +737,43 @@ def matmul_bf16kn_kernel[
         fill=SIMD[DType.float32, _FRAG8](0)
     )
 
-    var nkt = ceildiv(K, _MMA8)
+    # K is a multiple of _MMA8 by contract: this kernel only runs behind the
+    # q4 dequant path, whose group-128 layout guarantees K % 128 == 0. The
+    # earlier per-K-step `ktail` guard was dead weight — removing it is worth
+    # ~4% (race: .scratch/gemm_tune.mojo, 3.07 -> 3.18 TFLOP/s).
+    var nkt = K // _MMA8
     for ks in range(nkt):
         var kk = ks * _MMA8
-        var ktail = kk + _MMA8 > K  # final K-block is partial
         # A (X) is bf16 [M,K] row-major: lane's 2 frag elems are consecutive K
-        # cols kk+fcol, kk+fcol+1. K bound only on the partial tail block.
+        # cols kk+fcol, kk+fcol+1 (always in-bounds in K).
         var afrag = InlineArray[SIMD[DType.bfloat16, _FRAG8], _SG_NTM](
             uninitialized=True
         )
         comptime for mi in range(_SG_NTM):
             var grow = row_base + mi * _MMA8 + frow
-            if (interior or grow < M) and not ktail:
+            if interior or grow < M:
                 afrag[mi] = xp.unsafe_offset(grow * K + kk + fcol).unsafe_load[
                     width=_FRAG8
                 ]()
             else:
-                var af = SIMD[DType.bfloat16, _FRAG8](0)
-                if interior or grow < M:
-                    comptime for s in range(_FRAG8):
-                        if kk + fcol + s < K:
-                            af[s] = xp[unsafe_offset=grow * K + kk + fcol + s]
-                afrag[mi] = af
+                afrag[mi] = SIMD[DType.bfloat16, _FRAG8](0)
         # B (W) is bf16 [K,N]: B[k_idx, j] = W[k_idx*N + j]; frag slots are
-        # consecutive j → one 2-wide vector load. Row kk+frow needs a K bound
-        # only on the tail block; col needs an N bound on edge subtiles.
+        # consecutive j → one 2-wide vector load. Col needs an N bound on
+        # edge subtiles; the K row is always in-bounds.
         var bfrag = InlineArray[SIMD[DType.bfloat16, _FRAG8], _SG_NTN](
             uninitialized=True
         )
         comptime for ni in range(_SG_NTN):
             var krow = kk + frow
             var gj = col_base + ni * _MMA8 + fcol
-            if (interior or gj + 1 < N) and not ktail:
+            if interior or gj + 1 < N:
                 bfrag[ni] = wp.unsafe_offset(krow * N + gj).unsafe_load[
                     width=_FRAG8
                 ]()
             else:
                 var bf = SIMD[DType.bfloat16, _FRAG8](0)
-                if krow < K:
-                    comptime for s in range(_FRAG8):
-                        if gj + s < N:
-                            bf[s] = wp[unsafe_offset=krow * N + gj + s]
+                if gj < N:
+                    bf[0] = wp[unsafe_offset=krow * N + gj]
                 bfrag[ni] = bf
         comptime for mi in range(_SG_NTM):
             comptime for ni in range(_SG_NTN):
