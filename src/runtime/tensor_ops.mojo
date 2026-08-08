@@ -70,11 +70,12 @@ from kernels import (
 comptime BLOCK = 256
 """Default GPU threads-per-block for the 1D op launches."""
 
-comptime DQ_MIN_M = 256
+comptime DQ_MIN_M = 128
 """Minimum M to route prefill through the dequant-once bf16 GEMM. Below this
 the fused int4 GEMM wins: dequant-once pays ~4.5× the weight bytes (0.5 read +
 2 write + 2 re-read vs 0.5 fused), which only amortizes once the GEMM is
-firmly compute-bound. Crossover measured on M4 (.scratch/dq_crossover.mojo)."""
+firmly compute-bound. Crossover re-measured post-ktail-fix on M4
+(.scratch/dq_crossover.mojo): parity at M=128, +10-17% at 256, +30-41% at 512+."""
 
 comptime DevBuf = DeviceBuffer[DType.float32]
 """An f32 device buffer — the common activation/working type."""

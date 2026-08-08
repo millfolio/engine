@@ -254,31 +254,49 @@ struct BlockCache(Movable):
         """
         if not self.enabled:
             return
-        var slice_f = (
-            self.B * self.nkv
-        )  # elements per (block, layer) slice (f16 = 2 bytes)
+        var nblk = b - a
+        if nblk <= 0:
+            return
+        var slice_f = self.B * self.nkv  # elements per (block, layer) slice
+        var slice_bytes = slice_f * 4
+        var per_block = self.nlayers * 2 * slice_bytes
+        # ONE map_to_host per layer buffer, not per (block, layer): each map
+        # synchronizes the stream and remaps, so the old block-outer loop cost
+        # 2*nlayers*nblocks maps (~3.5k for a 1570-token store ≈ 1.3 s of pure
+        # mapping churn, billed to the request's first decode token). Stage
+        # the slices into one host buffer layer-major (72 maps total), then
+        # write the per-block files byte-identically to the old layout:
+        # ids header, then per layer K slice, V slice.
+        var staging = List[UInt8](length=nblk * per_block, fill=0)
+        var sp = staging.unsafe_ptr()
+        for l in range(self.nlayers):
+            with kcs[l].map_to_host() as h:
+                var src = h.unsafe_ptr().unsafe_bitcast[UInt8]()
+                for bi in range(a, b):
+                    unsafe_memcpy(
+                        dest=sp.unsafe_offset(
+                            (bi - a) * per_block + l * 2 * slice_bytes
+                        ),
+                        src=src.unsafe_offset(bi * slice_bytes),
+                        count=slice_bytes,
+                    )
+            with vcs[l].map_to_host() as h:
+                var src = h.unsafe_ptr().unsafe_bitcast[UInt8]()
+                for bi in range(a, b):
+                    unsafe_memcpy(
+                        dest=sp.unsafe_offset(
+                            (bi - a) * per_block
+                            + l * 2 * slice_bytes
+                            + slice_bytes
+                        ),
+                        src=src.unsafe_offset(bi * slice_bytes),
+                        count=slice_bytes,
+                    )
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "w") as f:
                 self._write_ids(f, ids, bi * self.B)
-                for l in range(self.nlayers):
-                    with kcs[l].map_to_host() as h:
-                        var p = (
-                            h.unsafe_ptr().unsafe_bitcast[UInt8]().unsafe_offset(bi * slice_f * 4)
-                        )
-                        f.write_bytes(
-                            Span[UInt8, MutUntrackedOrigin](
-                                unsafe_ptr=p, length=slice_f * 4
-                            )
-                        )
-                    with vcs[l].map_to_host() as h:
-                        var p = (
-                            h.unsafe_ptr().unsafe_bitcast[UInt8]().unsafe_offset(bi * slice_f * 4)
-                        )
-                        f.write_bytes(
-                            Span[UInt8, MutUntrackedOrigin](
-                                unsafe_ptr=p, length=slice_f * 4
-                            )
-                        )
+                var off = (bi - a) * per_block
+                f.write_bytes(Span(staging)[off : off + per_block])
 
     def restore_blocks(
         self,
@@ -302,29 +320,49 @@ struct BlockCache(Movable):
         """
         if not self.enabled:
             return
+        var nblk = b - a
+        if nblk <= 0:
+            return
         var slice_f = self.B * self.nkv
+        var slice_bytes = slice_f * 4
+        var per_block = self.nlayers * 2 * slice_bytes
+        # Mirror of store_blocks: read every block file into one host staging
+        # buffer first, then ONE map_to_host per layer buffer to scatter the
+        # slices in (72 maps instead of 2*nlayers*nblocks).
+        var staging = List[UInt8](length=nblk * per_block, fill=0)
+        var sp = staging.unsafe_ptr()
         for bi in range(a, b):
             with open(self._path(_hex16(hashes[bi])), "r") as f:
                 _ = f.read_bytes(self.B * 4)  # skip the token-id header
-                for l in range(self.nlayers):
-                    with kcs[l].map_to_host() as h:
-                        var raw = f.read_bytes(slice_f * 4)
-                        unsafe_memcpy(
-                            dest=h.unsafe_ptr()
-                            .unsafe_bitcast[UInt8]()
-                            .unsafe_offset(bi * slice_f * 4),
-                            src=raw.unsafe_ptr(),
-                            count=slice_f * 4,
-                        )
-                    with vcs[l].map_to_host() as h:
-                        var raw = f.read_bytes(slice_f * 4)
-                        unsafe_memcpy(
-                            dest=h.unsafe_ptr()
-                            .unsafe_bitcast[UInt8]()
-                            .unsafe_offset(bi * slice_f * 4),
-                            src=raw.unsafe_ptr(),
-                            count=slice_f * 4,
-                        )
+                var raw = f.read_bytes(per_block)
+                unsafe_memcpy(
+                    dest=sp.unsafe_offset((bi - a) * per_block),
+                    src=raw.unsafe_ptr(),
+                    count=per_block,
+                )
+        for l in range(self.nlayers):
+            with kcs[l].map_to_host() as h:
+                var dst = h.unsafe_ptr().unsafe_bitcast[UInt8]()
+                for bi in range(a, b):
+                    unsafe_memcpy(
+                        dest=dst.unsafe_offset(bi * slice_bytes),
+                        src=sp.unsafe_offset(
+                            (bi - a) * per_block + l * 2 * slice_bytes
+                        ),
+                        count=slice_bytes,
+                    )
+            with vcs[l].map_to_host() as h:
+                var dst = h.unsafe_ptr().unsafe_bitcast[UInt8]()
+                for bi in range(a, b):
+                    unsafe_memcpy(
+                        dest=dst.unsafe_offset(bi * slice_bytes),
+                        src=sp.unsafe_offset(
+                            (bi - a) * per_block
+                            + l * 2 * slice_bytes
+                            + slice_bytes
+                        ),
+                        count=slice_bytes,
+                    )
 
     def touch_and_evict(mut self, hashes: List[UInt64], nblocks: Int) raises:
         """Move this request's blocks to the LRU tail, then evict from the front
