@@ -414,37 +414,74 @@ def mm_w(
             grid_dim=ceildiv(ceildiv(M * K, 4), BLOCK),
             block_dim=BLOCK,
         )
-        comptime kg = matmul_bf16kn_kernel[type_of(lay)]
-        cached_enqueue[kg](
-            ctx,
-            xbt,
-            wdt,
-            bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(use_bias),
-            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+        # WIDE (32×128) when ceildiv(M,32) is odd — saves half an M-tile of
+        # edge waste (bit-identical; 5-16% on 87-250-token suffixes/chunks,
+        # neutral on even parity — small-M race 2026-08-08).
+        if (ceildiv(M, 32) & 1) == 1:
+            comptime kgw = matmul_bf16kn_kernel[type_of(lay), True]
+            cached_enqueue[kgw](
+                ctx,
+                xbt,
+                wdt,
+                bt,
+                yt,
+                Int32(M),
+                Int32(K),
+                Int32(N),
+                Int32(use_bias),
+                grid_dim=(ceildiv(N, 128), ceildiv(M, 32)),
+                block_dim=SG_TPB,
+            )
+        else:
+            comptime kg = matmul_bf16kn_kernel[type_of(lay)]
+            cached_enqueue[kg](
+                ctx,
+                xbt,
+                wdt,
+                bt,
+                yt,
+                Int32(M),
+                Int32(K),
+                Int32(N),
+                Int32(use_bias),
+                grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+                block_dim=SG_TPB,
+            )
     elif simd_ok:
-        comptime ks = matmul_simd_q4_kernel[type_of(lay)]
-        cached_enqueue[ks](
-            ctx,
-            xt,
-            pt,
-            st,
-            bt,
-            yt,
-            Int32(M),
-            Int32(K),
-            Int32(N),
-            Int32(NG),
-            Int32(use_bias),
-            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB,
-        )
+        if (ceildiv(M, 32) & 1) == 1:
+            comptime ksw = matmul_simd_q4_kernel[type_of(lay), True]
+            cached_enqueue[ksw](
+                ctx,
+                xt,
+                pt,
+                st,
+                bt,
+                yt,
+                Int32(M),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=(ceildiv(N, 128), ceildiv(M, 32)),
+                block_dim=SG_TPB,
+            )
+        else:
+            comptime ks = matmul_simd_q4_kernel[type_of(lay)]
+            cached_enqueue[ks](
+                ctx,
+                xt,
+                pt,
+                st,
+                bt,
+                yt,
+                Int32(M),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+                block_dim=SG_TPB,
+            )
     else:
         comptime TM = 8
         comptime CN = 8

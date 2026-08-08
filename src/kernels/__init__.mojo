@@ -684,7 +684,7 @@ def _mma8x8_bf16(
 
 
 def matmul_bf16kn_kernel[
-    LT: TensorLayout
+    LT: TensorLayout, WIDE: Bool = False
 ](
     X: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
     W: TileTensor[DType.bfloat16, LT, MutAnyOrigin],
@@ -699,11 +699,16 @@ def matmul_bf16kn_kernel[
 
     W is NON-transposed [K,N] (the dequant-scratch layout) so B-side fragment
     loads are contiguous 2-wide vector loads — the [N,K] transposed gather
-    costs ~13% (bake-off). Same tile geometry/launch as `matmul_simd_kernel`:
-    grid=(ceildiv(N,SG_BN), ceildiv(M,SG_BM)), block_dim=SG_TPB.
+    costs ~13% (bake-off). Default geometry matches `matmul_simd_kernel`
+    (64×64 block, 2×2 simdgroups): grid=(ceildiv(N,SG_BN), ceildiv(M,SG_BM)),
+    block_dim=SG_TPB. WIDE re-arranges the same 4 simdgroups 1×4 (32×128
+    block; grid=(ceildiv(N,128), ceildiv(M,32))) — bit-identical outputs,
+    and 5-16% faster when ceildiv(M,32) is ODD (half an M-tile of edge waste
+    saved; neutral when even — route on that parity, small-M race 2026-08-08).
 
     Parameters:
         LT: Tensor layout type for the flat 1D buffers.
+        WIDE: 32×128 block geometry instead of 64×64 (for odd ceildiv(M,32)).
 
     Args:
         X: Input activations [M, K] (bf16, pre-cast by `cast_f32_bf16_kernel`).
@@ -726,8 +731,14 @@ def matmul_bf16kn_kernel[
     var frow = fl[0]
     var fcol = fl[1]
     var sg = Int(thread_idx.x) // 32  # simdgroup id 0..3
-    var row_base = Int(block_idx.y) * SG_BM + (sg // 2) * _SG_SGM
-    var col_base = Int(block_idx.x) * SG_BN + (sg % 2) * _SG_SGN
+    var row_base: Int
+    var col_base: Int
+    comptime if WIDE:
+        row_base = Int(block_idx.y) * 32
+        col_base = Int(block_idx.x) * 128 + sg * _SG_SGN
+    else:
+        row_base = Int(block_idx.y) * SG_BM + (sg // 2) * _SG_SGM
+        col_base = Int(block_idx.x) * SG_BN + (sg % 2) * _SG_SGN
     # Fully-interior subtile → unguarded loads (the common case).
     var interior = (row_base + _SG_SGM <= M) and (col_base + _SG_SGN <= N)
 
@@ -1828,7 +1839,7 @@ def matmul_tiled_q4_kernel[
 
 
 def matmul_simd_q4_kernel[
-    LT: TensorLayout
+    LT: TensorLayout, WIDE: Bool = False
 ](
     X: TileTensor[DType.float32, LT, MutAnyOrigin],
     P: TileTensor[DType.uint32, LT, MutAnyOrigin],
@@ -1876,19 +1887,35 @@ def matmul_simd_q4_kernel[
     var NG = Int(NG_arg)
     var use_bias = Int(use_bias_arg)
     comptime assert X.flat_rank == 1
+    # WIDE: the same 4 simdgroups arranged 1×4 (32×128 block, grid=
+    # (ceildiv(N,128), ceildiv(M,32))) instead of 2×2 (64×64). Bit-identical;
+    # 5-15% faster when ceildiv(M,32) is ODD (small-M race 2026-08-08) —
+    # callers route on that parity.
+    comptime _BN = 128 if WIDE else SG_BN
     var tid = Int(thread_idx.x)
     var lane = tid % 32
     var fl = _frag8_layout(lane)
     var frow = fl[0]
     var fcol = fl[1]
     var sg = tid // 32
-    var blk_row = Int(block_idx.y) * SG_BM
-    var blk_col = Int(block_idx.x) * SG_BN
-    var row_base = blk_row + (sg // 2) * _SG_SGM
-    var col_base = blk_col + (sg % 2) * _SG_SGN
+    var blk_row: Int
+    var blk_col: Int
+    var row_base: Int
+    var col_base: Int
+    comptime if WIDE:
+        blk_row = Int(block_idx.y) * 32
+        blk_col = Int(block_idx.x) * _BN
+        row_base = blk_row
+        col_base = blk_col + sg * _SG_SGN
+    else:
+        blk_row = Int(block_idx.y) * SG_BM
+        blk_col = Int(block_idx.x) * _BN
+        row_base = blk_row + (sg // 2) * _SG_SGM
+        col_base = blk_col + (sg % 2) * _SG_SGN
+    var col_off = col_base - blk_col  # this simdgroup's column base in the tile
 
     var Bs = stack_allocation[
-        _Q4_BK * SG_BN, Float32, address_space=AddressSpace.SHARED
+        _Q4_BK * _BN, Float32, address_space=AddressSpace.SHARED
     ]()
 
     var xp = X.ptr
@@ -1900,14 +1927,14 @@ def matmul_simd_q4_kernel[
 
     var kc = 0
     while kc < K:
-        # Cooperative WORD-vectorized dequant of W[blk_col..+64, kc..+_Q4_BK] → Bs
+        # Cooperative WORD-vectorized dequant of W[blk_col..+_BN, kc..+_Q4_BK] → Bs
         # (row-major [k_local][j_local]). Each thread takes one packed u32 = 8
         # nibbles of an 8-aligned k-run of one N column, unpacks all 8 + folds the
         # group scale once (8|128 so an 8-run never straddles a group).
-        comptime _NW = SG_BN * (_Q4_BK // 8)
+        comptime _NW = _BN * (_Q4_BK // 8)
         for w in range(tid, _NW, SG_TPB):
-            var j_local = w % SG_BN
-            var krun = (w // SG_BN) * 8
+            var j_local = w % _BN
+            var krun = (w // _BN) * 8
             var gj = blk_col + j_local
             var gk0 = kc + krun
             if gj < N and gk0 < K:
@@ -1918,12 +1945,12 @@ def matmul_simd_q4_kernel[
                     DType.float32
                 ]() * scale
                 comptime for t in range(8):
-                    Bs[unsafe_offset=(krun + t) * SG_BN + j_local] = (
+                    Bs[unsafe_offset=(krun + t) * _BN + j_local] = (
                         qf[t] if gk0 + t < K else 0.0
                     )
             else:
                 comptime for t in range(8):
-                    Bs[unsafe_offset=(krun + t) * SG_BN + j_local] = 0.0
+                    Bs[unsafe_offset=(krun + t) * _BN + j_local] = 0.0
         barrier()
 
         comptime _KS = _Q4_BK // _MMA8
@@ -1950,16 +1977,13 @@ def matmul_simd_q4_kernel[
                                     unsafe_offset=grow * K + kk + fcol + s
                                 ]
                     afrag[mi] = af
-            # B (W) read from shared: Bs[(kk_local+frow)][(sg col half) + ni*8 + fcol]
+            # B (W) read from shared: Bs[(kk_local+frow)][col_off + ni*8 + fcol]
             var bfrag = InlineArray[SIMD[DType.float32, _FRAG8], _SG_NTN](
                 uninitialized=True
             )
             comptime for ni in range(_SG_NTN):
                 var brow = (
-                    (kss * _MMA8 + frow) * SG_BN
-                    + (sg % 2) * _SG_SGN
-                    + ni * _MMA8
-                    + fcol
+                    (kss * _MMA8 + frow) * _BN + col_off + ni * _MMA8 + fcol
                 )
                 bfrag[ni] = Bs.unsafe_offset(brow).unsafe_load[width=_FRAG8]()
             comptime for mi in range(_SG_NTM):
