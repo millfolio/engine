@@ -138,6 +138,9 @@ q4-kernels = { cmd = "mkdir -p build && mojo build tests/manual/q4_kernels.mojo 
 # Multi-row decode GEMV prototype (R output rows per simdgroup) — correctness
 # vs CPU + R-sweep bench vs the shipping kernel on the 3B decode shapes.
 q4-gemv-mr = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mr.mojo -I src -o build/q4_gemv_mr && ./build/q4_gemv_mr" }
+# Decode GEMV MLP race (issue-bound fix): shipping mrw vs vector-accumulate /
+# weight-prefetch / 16-word variants; validate + weight-GB/s. GPU only.
+gemv-mlp-race = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mlp.mojo -I src -o build/q4_gemv_mlp && ./build/q4_gemv_mlp" }
 decode-profile = { cmd = "mkdir -p build && mojo build tests/manual/decode_profile.mojo -I src -I ../jinja2.mojo/src -o build/decode_profile && ./build/decode_profile" }
 mega-parity = { cmd = "mkdir -p build && mojo build tests/manual/mega_parity.mojo -I src -I ../jinja2.mojo/src -o build/mega_parity && ./build/mega_parity" }
 q4-gemm-f16 = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemm_f16.mojo -I src -o build/q4_gemm_f16 && ./build/q4_gemm_f16" }
