@@ -159,3 +159,59 @@ def argmax_f(logits: List[Float32]) -> Int:
             best_v = logits[i]
             best = i
     return best
+
+
+def process_topk(
+    ids: List[Int], logits: List[Float32], temp: Float32, top_p: Float32
+) raises -> Dist:
+    """`process_logits`' tail for candidates already selected on the GPU.
+
+    `gpu_topk` returns the top-k (ids, PENALIZED logits) in descending order —
+    exactly what `process_logits` holds after its repetition-penalty + top-k
+    stages (temperature is order-preserving, so selecting before scaling is
+    equivalent). This applies the remaining HF steps over just the k
+    candidates: temperature → softmax → top-p prefix → renormalize.
+
+    Args:
+        ids: The top-k token ids, descending by penalized logit.
+        logits: The matching penalized logits (pre-temperature).
+        temp: Temperature; every logit is divided by it.
+        top_p: Nucleus threshold; keep the smallest prefix whose cumulative
+            probability reaches `top_p`.
+
+    Returns:
+        A `Dist` of the surviving token ids and renormalized probabilities.
+
+    Raises:
+        Error: if `ids` is empty.
+    """
+    if len(ids) == 0:
+        raise Error("process_topk: empty candidate list")
+    var logs = List[Float32](capacity=len(logits))
+    for i in range(len(logits)):
+        logs.append(logits[i] / temp)
+    var maxl = logs[0]
+    var ps = List[Float32]()
+    var z = Float32(0.0)
+    for i in range(len(logs)):
+        var e = exp(logs[i] - maxl)
+        ps.append(e)
+        z += e
+    for i in range(len(ps)):
+        ps[i] = ps[i] / z
+    var keep = 0
+    var cum = Float32(0.0)
+    for i in range(len(ps)):
+        keep = i + 1
+        cum += ps[i]
+        if cum >= top_p:
+            break
+    var out_ids = List[Int]()
+    var out_probs = List[Float32]()
+    var s = Float32(0.0)
+    for i in range(keep):
+        s += ps[i]
+    for i in range(keep):
+        out_ids.append(ids[i])
+        out_probs.append(ps[i] / s)
+    return Dist(out_ids^, out_probs^)

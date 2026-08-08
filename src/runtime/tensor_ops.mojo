@@ -13,6 +13,10 @@ from layout import TileTensor, row_major
 from runtime.kernel_cache import cached_enqueue
 
 from kernels import (
+    penalize_copy_kernel,
+    mask_mark_kernel,
+    argmax_part_kernel,
+    argmax_merge_kernel,
     matmul_kernel,
     matmul_simd_kernel,
     matmul_tiled_kernel,
@@ -24,10 +28,16 @@ from kernels import (
     matmul_q4_small_kernel,
     matmul_simd_q4_kernel,
     matmul_tiled_q4_kernel,
+    matmul_bf16kn_kernel,
+    dequant_q4_bf16t_kernel,
+    cast_f32_bf16_kernel,
     matmul_resid_kernel,
     matmul_q4_resid_kernel,
     matmul_norm_kernel,
     matmul_q4_norm_kernel,
+    matmul_q4_mrw_kernel,
+    matmul_q4_norm_mrw_kernel,
+    matmul_q4_silu_resid_mrw_kernel,
     matmul_silu_resid_kernel,
     matmul_q4_silu_resid_kernel,
     rmsnorm_kernel,
@@ -59,6 +69,12 @@ from kernels import (
 
 comptime BLOCK = 256
 """Default GPU threads-per-block for the 1D op launches."""
+
+comptime DQ_MIN_M = 256
+"""Minimum M to route prefill through the dequant-once bf16 GEMM. Below this
+the fused int4 GEMM wins: dequant-once pays ~4.5× the weight bytes (0.5 read +
+2 write + 2 re-read vs 0.5 fused), which only amortizes once the GEMM is
+firmly compute-bound. Crossover measured on M4 (.scratch/dq_crossover.mojo)."""
 
 comptime DevBuf = DeviceBuffer[DType.float32]
 """An f32 device buffer — the common activation/working type."""
@@ -207,9 +223,14 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(use_bias),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
     elif simd_ok:
         # prefill, fast path: simdgroup-matrix GEMM (~4.5× the scalar tiled kernel
         # on the M4). Gated by the startup probe; the scalar path below is the
@@ -220,9 +241,14 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(use_bias),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB)
+            block_dim=SG_TPB,
+        )
     else:
         # prefill, scalar fallback: 2D register-tiled GEMM, one warp per (CN-column,
         # TM-token) block, so each weight is reused across TM tokens and each X value
@@ -236,11 +262,16 @@ def mm(
             TileTensor(x, row_major(M * K)),
             TileTensor(w, row_major(N * K)),
             TileTensor(b, row_major(N if use_bias != 0 else 1)),
-            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(use_bias),
             grid_dim=ceildiv(
                 ceildiv(N, CN) * ceildiv(M, TM) * WARP_SIZE, BLOCK
             ),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
     return y^
 
 
@@ -323,9 +354,15 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
             grid_dim=(ceildiv(N, _SM_BN), 1),
-            block_dim=_SM_TPB)
+            block_dim=_SM_TPB,
+        )
     elif M <= SPEC_MAX_M:
         # Tiny M (2..4) — or no simdgroup intrinsic: batched GEMV (weights read once,
         # M rows accumulated in registers); cheapest at the smallest batch sizes.
@@ -336,9 +373,60 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
             grid_dim=ceildiv(N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
+    elif simd_ok and M >= DQ_MIN_M:
+        # Large-M prefill: dequant-once bf16 pipeline (MAX linalg bake-off
+        # 2026-08-07 — bf16 MMA operands + contiguous [K,N] B-side vector
+        # loads reach ~3.0 TFLOP/s effective incl. the dequant + X cast, vs
+        # 2.15 for the fused int4 GEMM below; +37% at M=1570). Scratch is
+        # transient per call (stream-ordered free; largest = gate_up 90 MB).
+        var wdq = ctx.enqueue_create_buffer[DType.bfloat16](K * N)
+        var xb = ctx.enqueue_create_buffer[DType.bfloat16](M * K)
+        var wdt = TileTensor(wdq, row_major(K * N))
+        var xbt = TileTensor(xb, row_major(M * K))
+        comptime kd = dequant_q4_bf16t_kernel[type_of(lay)]
+        cached_enqueue[kd](
+            ctx,
+            pt,
+            st,
+            wdt,
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            grid_dim=(ceildiv(N, 32), ceildiv(K // 8, 4)),
+            block_dim=(32, 4),
+        )
+        comptime kc = cast_f32_bf16_kernel[type_of(lay)]
+        cached_enqueue[kc](
+            ctx,
+            xt,
+            xbt,
+            Int32(M * K),
+            grid_dim=ceildiv(ceildiv(M * K, 4), BLOCK),
+            block_dim=BLOCK,
+        )
+        comptime kg = matmul_bf16kn_kernel[type_of(lay)]
+        cached_enqueue[kg](
+            ctx,
+            xbt,
+            wdt,
+            bt,
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(use_bias),
+            grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
+            block_dim=SG_TPB,
+        )
     elif simd_ok:
         comptime ks = matmul_simd_q4_kernel[type_of(lay)]
         cached_enqueue[ks](
@@ -347,9 +435,15 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB)
+            block_dim=SG_TPB,
+        )
     else:
         comptime TM = 8
         comptime CN = 8
@@ -360,11 +454,17 @@ def mm_w(
             pt,
             st,
             bt,
-            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(NG),            Int32(use_bias),
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
             grid_dim=ceildiv(
                 ceildiv(N, CN) * ceildiv(M, TM) * WARP_SIZE, BLOCK
             ),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
     return y^
 
 
@@ -441,9 +541,14 @@ def mm_w_add(
             TileTensor(w.bf16, row_major(N * K)),
             bt,
             TileTensor(resid, lay),
-            TileTensor(y, lay),            Int32(M),            Int32(K),            Int32(N),            Int32(use_bias),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(use_bias),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
     return y^
 
 
@@ -493,9 +598,14 @@ def mm_norm(
         TileTensor(lnw, row_major(K)),
         TileTensor(w, row_major(N * K)),
         TileTensor(b, row_major(N if use_bias != 0 else 1)),
-        TileTensor(y, lay),        Int32(M),        Int32(K),        Int32(N),        Int32(use_bias),
+        TileTensor(y, lay),
+        Int32(M),
+        Int32(K),
+        Int32(N),
+        Int32(use_bias),
         grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -551,23 +661,46 @@ def mm_w_norm(
     # N=2560: 38 vs 18 GB/s; gate_up N=22016: 47 vs 21 GB/s; benches in
     # .scratch/lmhead_variants.mojo + layer_variants.mojo). The rw kernels
     # stay in src/kernels for the next driver-era re-tune.
-    comptime kv_ = matmul_q4_norm_kernel[type_of(lay)]
-    cached_enqueue[kv_](
-        ctx,
-        TileTensor(x, row_major(M * K)),
-        TileTensor(lnw, row_major(K)),
-        TileTensor(w.packed, row_major(N * K // 8)),
-        TileTensor(w.scales, row_major(N * NG)),
-        TileTensor(b, row_major(N if use_bias != 0 else 1)),
-        TileTensor(y, lay),
-        Int32(M),
-        Int32(K),
-        Int32(N),
-        Int32(NG),
-        Int32(use_bias),
-        grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-        block_dim=BLOCK,
-    )
+    if N >= 4096:
+        # Big-N decode (gate_up, LM head): UNFUSED mrw streams real weights at
+        # ~90 GB/s vs the plain kernel's ~35; folding the norm INTO the mrw
+        # loop costs 2.2x (extra x-side streams serialize its load pipeline),
+        # so RMSNorm runs as its own tiny launch (~0.14 ms) instead.
+        var xn = rmsnorm(ctx, x, lnw, M, K)
+        comptime km = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+        cached_enqueue[km](
+            ctx,
+            TileTensor(xn, row_major(M * K)),
+            TileTensor(w.packed, row_major(N * K // 8)),
+            TileTensor(w.scales, row_major(N * NG)),
+            TileTensor(b, row_major(N if use_bias != 0 else 1)),
+            TileTensor(y, lay),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
+            grid_dim=ceildiv(N, 2),
+            block_dim=4 * WARP_SIZE,
+        )
+    else:
+        # Small-N decode (qkv, o): launch-latency-bound — plain wins.
+        comptime kv_ = matmul_q4_norm_kernel[type_of(lay)]
+        cached_enqueue[kv_](
+            ctx,
+            TileTensor(x, row_major(M * K)),
+            TileTensor(lnw, row_major(K)),
+            TileTensor(w.packed, row_major(N * K // 8)),
+            TileTensor(w.scales, row_major(N * NG)),
+            TileTensor(b, row_major(N if use_bias != 0 else 1)),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(use_bias),
+            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
+            block_dim=BLOCK,
+        )
     return y^
 
 
@@ -609,17 +742,27 @@ def mm_w_silu_add(
     var y = ctx.enqueue_create_buffer[DType.float32](M * N)
     var lay = row_major(M * N)
     if w.q4:
+        # Long-K down-proj: UNFUSED mrw streams real weights at ~72 GB/s vs
+        # ~35 plain; the SwiGLU folds cost 2.2x inside mrw's load pipeline,
+        # so silu(gate)·up runs as its own tiny launch and the residual rides
+        # the mrw kernel's bias input (exact: bias is += B[n]).
         var NG = inter // Q4_GROUP
-        comptime kq = matmul_q4_silu_resid_kernel[type_of(lay)]
+        var act = silu_mul_cat(ctx, gu, M, inter)
+        comptime kq = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
         cached_enqueue[kq](
             ctx,
-            TileTensor(gu, row_major(M * 2 * inter)),
+            TileTensor(act, row_major(M * inter)),
             TileTensor(w.packed, row_major(N * inter // 8)),
             TileTensor(w.scales, row_major(N * NG)),
             TileTensor(resid, lay),
-            TileTensor(y, lay),            Int32(M),            Int32(inter),            Int32(N),            Int32(NG),
-            grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK)
+            TileTensor(y, lay),
+            Int32(inter),
+            Int32(N),
+            Int32(NG),
+            Int32(1),
+            grid_dim=ceildiv(N, 2),
+            block_dim=4 * WARP_SIZE,
+        )
     else:
         comptime kb = matmul_silu_resid_kernel[type_of(lay)]
         cached_enqueue[kb](
@@ -627,9 +770,13 @@ def mm_w_silu_add(
             TileTensor(gu, row_major(M * 2 * inter)),
             TileTensor(w.bf16, row_major(N * inter)),
             TileTensor(resid, lay),
-            TileTensor(y, lay),            Int32(M),            Int32(inter),            Int32(N),
+            TileTensor(y, lay),
+            Int32(M),
+            Int32(inter),
+            Int32(N),
             grid_dim=ceildiv(M * N * WARP_SIZE, BLOCK),
-            block_dim=BLOCK)
+            block_dim=BLOCK,
+        )
     return y^
 
 
@@ -668,11 +815,15 @@ def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
         with wb.map_to_host() as h:
             for i in range(N * K):
                 var f = Float32((i * 2) % 5) * 0.5 - 1.0
-                var bits = Pointer(to=f).unsafe_bitcast[UInt32]()[unsafe_offset=0]
+                var bits = Pointer(to=f).unsafe_bitcast[UInt32]()[
+                    unsafe_offset=0
+                ]
                 var top = UInt16(bits >> 16)
                 h[i] = top
                 var re: UInt32 = UInt32(top) << 16
-                hw.append(Pointer(to=re).unsafe_bitcast[Float32]()[unsafe_offset=0])
+                hw.append(
+                    Pointer(to=re).unsafe_bitcast[Float32]()[unsafe_offset=0]
+                )
         var lay = row_major(M * N)
         var xt = TileTensor(xb, row_major(M * K))
         var wt = TileTensor(wb, row_major(N * K))
@@ -684,9 +835,14 @@ def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:
             xt,
             wt,
             bt,
-            yt,            Int32(M),            Int32(K),            Int32(N),            Int32(0),
+            yt,
+            Int32(M),
+            Int32(K),
+            Int32(N),
+            Int32(0),
             grid_dim=(ceildiv(N, SG_BN), ceildiv(M, SG_BM)),
-            block_dim=SG_TPB)
+            block_dim=SG_TPB,
+        )
         ctx.synchronize()
         var ok = True
         with yb.map_to_host() as h:
@@ -731,7 +887,9 @@ def rmsnorm(
         ctx,
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
-        TileTensor(y, lay),        Int32(T),        Int32(dim),
+        TileTensor(y, lay),
+        Int32(T),
+        Int32(dim),
         grid_dim=ceildiv(T * WARP_SIZE, BLOCK),
         block_dim=BLOCK,  # one warp per row
     )
@@ -773,10 +931,13 @@ def rmsnorm_add(
         TileTensor(x, lay),
         TileTensor(w, row_major(dim)),
         TileTensor(resid, lay),
-        TileTensor(y, lay),        Int32(T),        Int32(dim),
+        TileTensor(y, lay),
+        Int32(T),
+        Int32(dim),
         scale,
         grid_dim=ceildiv(T * WARP_SIZE, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -813,9 +974,14 @@ def gelu_mul_strided(
         ctx,
         TileTensor(a, lay),
         TileTensor(p, row_major(T * stride)),
-        TileTensor(y, lay),        Int32(T),        Int32(n),        Int32(stride),        Int32(off),
+        TileTensor(y, lay),
+        Int32(T),
+        Int32(n),
+        Int32(stride),
+        Int32(off),
         grid_dim=ceildiv(T * n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -843,9 +1009,11 @@ def add(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),        Int32(n),
+        TileTensor(y, lay),
+        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -873,9 +1041,11 @@ def silu_mul(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),        Int32(n),
+        TileTensor(y, lay),
+        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -902,9 +1072,12 @@ def silu_mul_cat(
     cached_enqueue[k](
         ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
-        TileTensor(y, lay),        Int32(T),        Int32(inter),
+        TileTensor(y, lay),
+        Int32(T),
+        Int32(inter),
         grid_dim=ceildiv(T * inter, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -931,9 +1104,12 @@ def gelu_mul_cat(
     cached_enqueue[k](
         ctx,
         TileTensor(gu, row_major(T * 2 * inter)),
-        TileTensor(y, lay),        Int32(T),        Int32(inter),
+        TileTensor(y, lay),
+        Int32(T),
+        Int32(inter),
         grid_dim=ceildiv(T * inter, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -961,9 +1137,11 @@ def gelu_mul(
         ctx,
         TileTensor(a, lay),
         TileTensor(b, lay),
-        TileTensor(y, lay),        Int32(n),
+        TileTensor(y, lay),
+        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -1002,9 +1180,12 @@ def nll_gather(
         ctx,
         TileTensor(logits, row_major(n * vocab)),
         TileTensor(tgt, nlay),
-        TileTensor(out, nlay),        Int32(n),        Int32(vocab),
+        TileTensor(out, nlay),
+        Int32(n),
+        Int32(vocab),
         grid_dim=ceildiv(n * WARP_SIZE, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     ctx.synchronize()
     var res = List[Float32]()
     with out.map_to_host() as m:
@@ -1030,10 +1211,12 @@ def softcap(ctx: DeviceContext, mut x: DevBuf, n: Int, cap: Float32) raises:
     comptime k = softcap_kernel[type_of(lay)]
     cached_enqueue[k](
         ctx,
-        TileTensor(x, lay),        Int32(n),
+        TileTensor(x, lay),
+        Int32(n),
         cap,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
 
 
 def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
@@ -1052,10 +1235,12 @@ def add_scalar(ctx: DeviceContext, mut x: DevBuf, n: Int, c: Float32) raises:
     comptime k = add_scalar_kernel[type_of(lay)]
     cached_enqueue[k](
         ctx,
-        TileTensor(x, lay),        Int32(n),
+        TileTensor(x, lay),
+        Int32(n),
         c,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
 
 
 def mul_scalar(
@@ -1081,10 +1266,12 @@ def mul_scalar(
     cached_enqueue[k](
         ctx,
         TileTensor(x, lay),
-        TileTensor(y, lay),        Int32(n),
+        TileTensor(y, lay),
+        Int32(n),
         c,
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -1122,9 +1309,12 @@ def embed_tokens(
         ctx,
         TileTensor(ids, row_major(T)),
         TileTensor(emb, row_major(vocab * hidden)),
-        TileTensor(h, lay),        Int32(T),        Int32(hidden),
+        TileTensor(h, lay),
+        Int32(T),
+        Int32(hidden),
         grid_dim=ceildiv(T * hidden, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return h^
 
 
@@ -1151,9 +1341,12 @@ def last_row(
     cached_enqueue[k](
         ctx,
         TileTensor(src, row_major(T * dim)),
-        TileTensor(y, lay),        Int32((T - 1) * dim),        Int32(dim),
+        TileTensor(y, lay),
+        Int32((T - 1) * dim),
+        Int32(dim),
         grid_dim=ceildiv(dim, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
     return y^
 
 
@@ -1184,9 +1377,12 @@ def copy_into(
     cached_enqueue[k](
         ctx,
         TileTensor(src, lay),
-        TileTensor(dst, row_major(dst_len)),        Int32(dst_offset),        Int32(n),
+        TileTensor(dst, row_major(dst_len)),
+        Int32(dst_offset),
+        Int32(n),
         grid_dim=ceildiv(n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
 
 
 def copy_strided(
@@ -1222,6 +1418,187 @@ def copy_strided(
     cached_enqueue[k](
         ctx,
         TileTensor(src, lay),
-        TileTensor(dst, row_major(dst_len)),        Int32(T),        Int32(in_stride),        Int32(in_off),        Int32(dst_off),        Int32(n),
+        TileTensor(dst, row_major(dst_len)),
+        Int32(T),
+        Int32(in_stride),
+        Int32(in_off),
+        Int32(dst_off),
+        Int32(n),
         grid_dim=ceildiv(T * n, BLOCK),
-        block_dim=BLOCK)
+        block_dim=BLOCK,
+    )
+
+
+# ── GPU token selection (argmax / top-k) ───────────────────────────────────────
+
+comptime AMAX_BLOCKS = 64
+"""Stage-1 grid for the argmax reductions (64 blocks × 256 threads = 512
+warps → 1024 partial floats; plenty of occupancy for vocab-sized rows)."""
+
+comptime AMAX_PARTS = AMAX_BLOCKS * (BLOCK // 32)
+"""Number of per-warp (index, value) partial pairs stage 1 emits."""
+
+
+@fieldwise_init
+struct SelectBufs(Movable):
+    """Reusable device scratch for token selection: the penalized work row,
+    stage-1 partials, the (index, value) output slots, and the seen-token
+    mask that carries the repetition-penalty context across decode steps."""
+
+    var work: DevBuf
+    """Penalized copy of the logits row (vocab f32; top-k mutates it)."""
+    var partials: DevBuf
+    """Stage-1 per-warp partials (2·AMAX_PARTS f32)."""
+    var outb: DevBuf
+    """Selection results, 2 f32 (index, value) per slot."""
+    var mask: DeviceBuffer[DType.uint8]
+    """Per-vocab seen mask for the repetition penalty (uint8)."""
+
+
+def make_select_bufs(
+    ctx: DeviceContext, vocab: Int, max_slots: Int
+) raises -> SelectBufs:
+    """Allocate `SelectBufs` for a `vocab`-wide model and ≤ `max_slots`
+    selection slots (max of top-k k and the spec-verify row count)."""
+    return SelectBufs(
+        ctx.enqueue_create_buffer[DType.float32](vocab),
+        ctx.enqueue_create_buffer[DType.float32](2 * AMAX_PARTS),
+        ctx.enqueue_create_buffer[DType.float32](2 * max_slots),
+        ctx.enqueue_create_buffer[DType.uint8](vocab),
+    )
+
+
+def mask_reset(
+    ctx: DeviceContext,
+    mut b: SelectBufs,
+    mut ids: DeviceBuffer[DType.int32],
+    n_ids: Int,
+) raises:
+    """Clear the seen mask and mark the `n_ids` prompt/context token ids."""
+    b.mask.enqueue_fill(0)
+    if n_ids == 0:
+        return
+    comptime km = mask_mark_kernel[type_of(row_major(1))]
+    cached_enqueue[km](
+        ctx,
+        TileTensor(ids, row_major(n_ids)),
+        TileTensor(b.mask, row_major(1)),
+        Int32(n_ids),
+        grid_dim=ceildiv(n_ids, BLOCK),
+        block_dim=BLOCK,
+    )
+
+
+def _amax_round(
+    ctx: DeviceContext,
+    mut src: DevBuf,
+    mut partials: DevBuf,
+    mut outb: DevBuf,
+    n: Int,
+    base: Int,
+    slot: Int,
+    mask_out: Int,
+) raises:
+    """One part+merge argmax round over src[base .. base+n) into slot."""
+    comptime kp = argmax_part_kernel[type_of(row_major(1))]
+    cached_enqueue[kp](
+        ctx,
+        TileTensor(src, row_major(1)),
+        TileTensor(partials, row_major(1)),
+        Int32(n),
+        Int32(base),
+        grid_dim=AMAX_BLOCKS,
+        block_dim=BLOCK,
+    )
+    comptime km = argmax_merge_kernel[type_of(row_major(1))]
+    cached_enqueue[km](
+        ctx,
+        TileTensor(partials, row_major(1)),
+        TileTensor(src, row_major(1)),
+        TileTensor(outb, row_major(1)),
+        Int32(AMAX_PARTS),
+        Int32(slot),
+        Int32(mask_out),
+        grid_dim=1,
+        block_dim=32,
+    )
+
+
+def sel_amax_part(ctx: DeviceContext, mut b: SelectBufs, n: Int) raises:
+    """One bare stage-1 argmax enqueue over the work row (diagnostics)."""
+    comptime kp = argmax_part_kernel[type_of(row_major(1))]
+    cached_enqueue[kp](
+        ctx,
+        TileTensor(b.work, row_major(1)),
+        TileTensor(b.partials, row_major(1)),
+        Int32(n),
+        Int32(0),
+        grid_dim=AMAX_BLOCKS,
+        block_dim=BLOCK,
+    )
+
+
+def gpu_argmax(
+    ctx: DeviceContext, mut logits: DevBuf, mut b: SelectBufs, n: Int
+) raises -> Int:
+    """Argmax of a device logits row: two tiny kernels + an 8-byte download
+    (replaces downloading the whole row and scanning it on the host)."""
+    _amax_round(ctx, logits, b.partials, b.outb, n, 0, 0, 0)
+    ctx.synchronize()
+    var pair = download_f32(b.outb, 2)
+    return Int(pair[0])
+
+
+def gpu_argmax_rows(
+    ctx: DeviceContext, mut G: DevBuf, mut b: SelectBufs, rows: Int, n: Int
+) raises -> List[Int]:
+    """Per-row argmax of a [rows, n] device logits matrix (spec-decode verify):
+    2·rows tiny kernels + one 8·rows-byte download."""
+    for r in range(rows):
+        _amax_round(ctx, G, b.partials, b.outb, n, r * n, r, 0)
+    ctx.synchronize()
+    var pairs = download_f32(b.outb, 2 * rows)
+    var out = List[Int](capacity=rows)
+    for r in range(rows):
+        out.append(Int(pairs[2 * r]))
+    return out^
+
+
+def gpu_topk(
+    ctx: DeviceContext,
+    mut logits: DevBuf,
+    mut b: SelectBufs,
+    n: Int,
+    k: Int,
+    pen: Float32,
+    last_id: Int,
+) raises -> Tuple[List[Int], List[Float32]]:
+    """Top-k (ids, PENALIZED logits) of a device logits row, descending —
+    exactly `process_logits`' selection stage, on-device. The repetition
+    penalty uses the persistent seen mask plus `last_id` (also marked into
+    the mask for later steps); temperature/softmax/top-p stay on the host
+    over just these k candidates (temperature is order-preserving, and the
+    host softmax normalizes over the top-k only, so this is exact)."""
+    comptime kc = penalize_copy_kernel[type_of(row_major(1))]
+    cached_enqueue[kc](
+        ctx,
+        TileTensor(logits, row_major(1)),
+        TileTensor(b.work, row_major(1)),
+        TileTensor(b.mask, row_major(1)),
+        Int32(n),
+        Int32(0),
+        pen,
+        Int32(last_id),
+        grid_dim=ceildiv(n, BLOCK),
+        block_dim=BLOCK,
+    )
+    for slot in range(k):
+        _amax_round(ctx, b.work, b.partials, b.outb, n, 0, slot, 1)
+    ctx.synchronize()
+    var pairs = download_f32(b.outb, 2 * k)
+    var ids = List[Int](capacity=k)
+    var vals = List[Float32](capacity=k)
+    for s in range(k):
+        ids.append(Int(pairs[2 * s]))
+        vals.append(pairs[2 * s + 1])
+    return (ids^, vals^)

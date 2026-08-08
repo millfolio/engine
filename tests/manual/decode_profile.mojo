@@ -63,11 +63,15 @@ def med(mut v: List[Float64]) -> Float64:
 def main() raises:
     var ckpt = String(getenv("QWEN_SAFETENSORS"))
     if ckpt.byte_length() == 0:
+        # FALLBACK IS THE 0.5B FIXTURE MODEL — set QWEN_SAFETENSORS for real
+        # measurements (this bit us: a 0.5B number was read as the 3B's).
         ckpt = String(
             String(
                 read_text("tests/fixtures/forward/meta.txt").split("\n")[1]
             ).strip()
         )
+        print("WARNING: QWEN_SAFETENSORS unset — using the 0.5B fixture model")
+    print("checkpoint: ", ckpt, sep="")
     var user = String(
         "Explain how a hash map works and why lookups are fast. Then write a"
         " short Python example."
@@ -127,6 +131,6 @@ def main() raises:
           1000.0 / wm, " tok/s", sep="")
     print("attributed phases (sync at boundaries — upper bounds):")
     print("  embed+upload : ", med(t_embed), " ms", sep="")
-    print("  36 layers    : ", med(t_layers), " ms", sep="")
+    print("  ", nlayers, " layers    : ", med(t_layers), " ms", sep="")
     print("  lm_head+logits DOWNLOAD: ", med(t_logits), " ms", sep="")
     print("  host argmax  : ", med(t_host), " ms", sep="")

@@ -26,8 +26,15 @@ Package layout:
 Prefer importing from `model`; this facade is the surface to keep stable as the
 packages evolve."""
 
-from runtime.sampling import Dist, process_logits, next_rand, sample, argmax_f
+from runtime.sampling import Dist, process_logits, process_topk, next_rand, sample, argmax_f
 from runtime.tensor_ops import (
+    SelectBufs,
+    make_select_bufs,
+    mask_reset,
+    gpu_argmax,
+    gpu_argmax_rows,
+    gpu_topk,
+    sel_amax_part,
     BLOCK,
     DevBuf,
     WBuf,
@@ -89,6 +96,8 @@ from models.qwen import (
 )
 from models.gemma import GemmaWeights, load_gemma_weights, G_NLAYERS
 from runtime.engine import (
+    sess_step_dev,
+    sess_verify_dev,
     Session,
     new_session,
     sess_prefill,

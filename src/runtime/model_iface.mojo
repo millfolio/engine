@@ -161,6 +161,45 @@ trait ModelWeights(Movable):
         """
         ...
 
+    def lm_logits_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Produce the last position's vocab logits ON DEVICE (+ any final
+        softcap). No synchronize, no host copy — feed GPU token selection.
+
+        Args:
+            ctx: The GPU device context.
+            h: The final hidden state.
+            T: The number of positions in `h`.
+            dummy: A scratch buffer reused across calls.
+
+        Returns:
+            The last position's vocab logits as a device buffer.
+
+        Raises:
+            On device/compute errors.
+        """
+        ...
+
+    def lm_logits_all_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Produce logits for all `T` positions ON DEVICE (row-major T×vocab).
+
+        Args:
+            ctx: The GPU device context.
+            h: The final hidden state for all `T` positions.
+            T: The number of positions in `h`.
+            dummy: A scratch buffer reused across calls.
+
+        Returns:
+            The `T`×vocab logits as one device buffer (row-major).
+
+        Raises:
+            On device/compute errors.
+        """
+        ...
+
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
     ) raises -> List[Float32]:

@@ -338,6 +338,35 @@ def sess_step[
     return w.lm_logits(ctx, h, 1, s.dummy)
 
 
+def sess_step_dev[
+    W: ModelWeights
+](ctx: DeviceContext, mut w: W, mut s: Session, token: Int) raises -> DevBuf:
+    """`sess_step`, but the logits stay ON DEVICE (no sync, no vocab-sized
+    host copy) — pair with `gpu_argmax`/`gpu_topk` for token selection.
+
+    Parameters:
+        W: The model-weights family type (embed / run_layer / LM head).
+
+    Args:
+        ctx: The GPU device context.
+        w: The model weights (embed / run_layer / LM head).
+        s: The decode session (KV caches + position; updated in place).
+        token: The token id to decode at `s.pos`.
+
+    Returns:
+        The next-position vocab logits as a device buffer.
+
+    Raises:
+        On device/compute errors.
+    """
+    var one = upload_ids(ctx, [token])
+    var h = w.embed_prompt(ctx, one, 1)
+    for l in range(w.config().nlayers):
+        h = w.run_layer(ctx, l, h, s.kcs, s.vcs, 1, s.pos, s.cache_len, s.dummy)
+    s.pos += 1
+    return w.lm_logits_dev(ctx, h, 1, s.dummy)
+
+
 def generate[
     W: ModelWeights
 ](ctx: DeviceContext, mut w: W, prompt: List[Int], max_new: Int) raises -> List[
@@ -517,6 +546,35 @@ def sess_verify[
     for l in range(w.config().nlayers):
         h = w.run_layer(ctx, l, h, s.kcs, s.vcs, Q, s.pos, s.cache_len, s.dummy)
     return w.lm_logits_all(ctx, h, Q, s.dummy)
+
+
+def sess_verify_dev[
+    W: ModelWeights
+](ctx: DeviceContext, mut w: W, mut s: Session, batch: List[Int]) raises -> DevBuf:
+    """`sess_verify`, but the Q×vocab logits stay ON DEVICE — pair with
+    `gpu_argmax_rows` so verify downloads Q indices instead of Q×vocab floats.
+
+    Parameters:
+        W: The model-weights family type (embed / run_layer / LM head).
+
+    Args:
+        ctx: The GPU device context.
+        w: The model weights (embed / run_layer / all-position LM head).
+        s: The decode session (KV caches + position; `s.pos` NOT advanced).
+        batch: The [c0]+drafts token batch to verify.
+
+    Returns:
+        Logits for all Q positions (row-major Q×vocab) as a device buffer.
+
+    Raises:
+        On device/compute errors.
+    """
+    var Q = len(batch)
+    var ids_dev = upload_ids(ctx, batch)
+    var h = w.embed_prompt(ctx, ids_dev, Q)
+    for l in range(w.config().nlayers):
+        h = w.run_layer(ctx, l, h, s.kcs, s.vcs, Q, s.pos, s.cache_len, s.dummy)
+    return w.lm_logits_all_dev(ctx, h, Q, s.dummy)
 
 
 def _spec_emit(

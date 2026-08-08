@@ -319,6 +319,38 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         ctx.synchronize()
         return download_f32(logits, self.vocab)
 
+    def lm_logits_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Compute soft-capped LM-head logits for the LAST position only.
+
+        Args:
+            ctx: The device (GPU) context.
+            h: The final hidden states.
+            T: Number of positions in `h`.
+            dummy: Scratch buffer reused across GEMM calls.
+
+        Returns:
+            The soft-capped logits over the vocabulary for the last position.
+
+        Raises:
+            If a GPU kernel launch or buffer operation fails.
+        """
+        var hl = last_row(ctx, h, T, self.hidden)
+        var logits = mm_norm(
+            ctx,
+            hl,
+            self.final_norm,
+            self.embed,
+            dummy,
+            1,
+            self.hidden,
+            self.vocab,
+            0,
+        )
+        softcap(ctx, logits, self.vocab, E_FINAL_SOFTCAP)
+        return logits^
+
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
     ) raises -> List[Float32]:
@@ -351,6 +383,38 @@ struct GemmaE4bWeights(ModelWeights, Movable):
         softcap(ctx, logits, n, E_FINAL_SOFTCAP)
         ctx.synchronize()
         return download_f32(logits, n)
+
+    def lm_logits_all_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Compute soft-capped LM-head logits for ALL `T` positions (flattened).
+
+        Args:
+            ctx: The device (GPU) context.
+            h: The final hidden states.
+            T: Number of positions in `h`.
+            dummy: Scratch buffer reused across GEMM calls.
+
+        Returns:
+            The soft-capped logits for all `T` positions, flattened.
+
+        Raises:
+            If a GPU kernel launch or buffer operation fails.
+        """
+        var logits = mm_norm(
+            ctx,
+            h,
+            self.final_norm,
+            self.embed,
+            dummy,
+            T,
+            self.hidden,
+            self.vocab,
+            0,
+        )
+        var n = T * self.vocab
+        softcap(ctx, logits, n, E_FINAL_SOFTCAP)
+        return logits^
 
     def token_logprobs(
         mut self,

@@ -6,9 +6,25 @@
   "timeout": 600,
   "cooldown": 5,
   "targets": [
-    { "label": "millfolio",    "base_url": "http://127.0.0.1:8000/v1",  "model": "auto" },
-    { "label": "mlx",         "base_url": "http://127.0.0.1:8080/v1",  "model": "auto" },
-    { "label": "ollama-0.5b", "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:0.5b" },
-    { "label": "ollama-3b",   "base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:3b" }
+    {
+      "label": "millfolio",
+      "base_url": "http://127.0.0.1:8000/v1",
+      "model": "auto"
+    },
+    {
+      "label": "mlx",
+      "base_url": "http://127.0.0.1:8080/v1",
+      "model": "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    },
+    {
+      "label": "ollama-0.5b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen2.5:0.5b"
+    },
+    {
+      "label": "ollama-3b",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "model": "qwen2.5:3b"
+    }
   ]
 }

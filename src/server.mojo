@@ -47,7 +47,18 @@ from model import (
     new_session,
     sess_prefill_suffix,
     sess_step,
+    sess_step_dev,
     sess_verify,
+    sess_verify_dev,
+    DevBuf,
+    SelectBufs,
+    make_select_bufs,
+    mask_reset,
+    gpu_argmax,
+    gpu_argmax_rows,
+    gpu_topk,
+    process_topk,
+    upload_ids,
     sess_token_logprobs,
     _ngram_draft,
     _argmax_row,
@@ -153,6 +164,10 @@ comptime DEF_TOPP = Float32(0.8)
 """Default top-p (nucleus) sampling threshold when temperature > 0."""
 comptime DEF_REP = Float32(1.1)
 """Default repetition penalty when temperature > 0."""
+comptime SEL_SLOTS = 64
+"""Selection slots in `SelectBufs`: the top-k cap for the GPU sampling path
+(larger request top_k falls back to the host path) and the spec-verify row
+ceiling (SPEC_K+1 ≪ 64)."""
 comptime DEF_MAXNEW = 256
 """Default maximum number of new tokens to generate per request."""
 comptime SEED = UInt64(0x9E3779B97F4A7C15)
@@ -233,6 +248,10 @@ struct ServerState(Movable):
     """Tokenizer for the secondary embedding model, or None when none is loaded."""
     var embed_id: String  # id reported for the embedding model ("" if unset)
     """Id reported for the embedding model ("" when unset)."""
+    var sel: SelectBufs
+    """Device scratch for GPU token selection (argmax / top-k / rep-pen mask)."""
+    var vocab: Int
+    """The primary model's vocab size (row length for token selection)."""
 
     def __init__(
         out self,
@@ -251,6 +270,8 @@ struct ServerState(Movable):
         var embed_w: Optional[Weights],
         var embed_tok: Optional[Tokenizer],
         var embed_id: String,
+        var sel: SelectBufs,
+        vocab: Int,
     ):
         """Take ownership of the loaded models, tokenizers, caches, and ids; start with an empty `cached` list.
 
@@ -268,6 +289,8 @@ struct ServerState(Movable):
             embed_w: Secondary embedding model weights, or None when none is loaded.
             embed_tok: Tokenizer for the secondary embedding model, or None.
             embed_id: Id reported for the embedding model ("" when unset).
+            sel: Device scratch for GPU token selection.
+            vocab: The primary model's vocab size.
         """
         self.ctx = ctx^
         self.model = model^
@@ -283,6 +306,8 @@ struct ServerState(Movable):
         self.embed_w = embed_w^
         self.embed_tok = embed_tok^
         self.embed_id = embed_id^
+        self.sel = sel^
+        self.vocab = vocab
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
@@ -602,6 +627,28 @@ def _verify(mut s: ServerState, batch: List[Int]) raises -> List[Float32]:
     return sess_verify(s.ctx, s.model[Weights], s.sess, batch)
 
 
+def _step_dev(mut s: ServerState, token: Int) raises -> DevBuf:
+    """`_step`, but the logits stay on device for GPU token selection."""
+    if s.model.isa[GemmaWeights]():
+        return sess_step_dev(s.ctx, s.model[GemmaWeights], s.sess, token)
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_step_dev(s.ctx, s.model[GemmaE2bWeights], s.sess, token)
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_step_dev(s.ctx, s.model[GemmaE4bWeights], s.sess, token)
+    return sess_step_dev(s.ctx, s.model[Weights], s.sess, token)
+
+
+def _verify_dev(mut s: ServerState, batch: List[Int]) raises -> DevBuf:
+    """`_verify`, but the Q×vocab logits stay on device (row argmax on GPU)."""
+    if s.model.isa[GemmaWeights]():
+        return sess_verify_dev(s.ctx, s.model[GemmaWeights], s.sess, batch)
+    if s.model.isa[GemmaE2bWeights]():
+        return sess_verify_dev(s.ctx, s.model[GemmaE2bWeights], s.sess, batch)
+    if s.model.isa[GemmaE4bWeights]():
+        return sess_verify_dev(s.ctx, s.model[GemmaE4bWeights], s.sess, batch)
+    return sess_verify_dev(s.ctx, s.model[Weights], s.sess, batch)
+
+
 def _warmup(mut s: ServerState) raises:
     """Force the Metal shader compiler to build every GPU pipeline the generative
     hot path uses NOW (at load), so it never runs on a user query.
@@ -624,6 +671,15 @@ def _warmup(mut s: ServerState) raises:
     own-KV vs KV-shared) are all touched. Output is discarded and the KV session
     is reset to empty — no effect on numerics or on the first real request.
     """
+    # Token-selection pipelines (argmax part/merge, penalize-copy, mask-mark):
+    # tiny kernels, but their first dispatch would otherwise compile under a
+    # user query. Zero logits are fine — outputs are discarded.
+    var wlog = s.ctx.enqueue_create_buffer[DType.float32](s.vocab)
+    wlog.enqueue_fill(0.0)
+    _ = gpu_argmax(s.ctx, wlog, s.sel, s.vocab)
+    var wids = upload_ids(s.ctx, [0])
+    mask_reset(s.ctx, s.sel, wids, 1)
+    _ = gpu_topk(s.ctx, wlog, s.sel, s.vocab, 4, Float32(1.1), -1)
     var pair: List[Int] = [1, 1]  # two arbitrary in-vocab token ids (BOS-ish)
     _ = _prefill_suffix(s, pair, 0)  # prefill kernels (M=2)
     _ = _step(s, 1)  # decode kernels (M=1)
@@ -768,33 +824,58 @@ def gen_full(
 
     if temp > 0.0:
         # Sampling: per-token decode (speculative decode is only bit-exact for
-        # greedy, so it's restricted to temp==0 below).
-        while len(gen) < cap:
-            var nxt = sample(
-                process_logits(logits, context, temp, top_k, top_p, DEF_REP),
-                rng,
-            )
-            if _is_stop(s, nxt):
-                stopped = True
-                break
+        # greedy, so it's restricted to temp==0 below). Token selection runs
+        # ON DEVICE (gpu_topk: rep-pen + top-k; the host sees k pairs, not the
+        # vocab) when the request's top_k fits the selection buffers; larger
+        # k falls back to the original host path. The FIRST token still uses
+        # the host path — prefill already downloaded its logits.
+        var use_gpu_sel = top_k >= 1 and top_k <= SEL_SLOTS
+        if use_gpu_sel:
+            var pid_buf = upload_ids(s.ctx, ids)
+            mask_reset(s.ctx, s.sel, pid_buf, len(ids))
+        var nxt = sample(
+            process_logits(logits, context, temp, top_k, top_p, DEF_REP),
+            rng,
+        )
+        if _is_stop(s, nxt):
+            stopped = True
+        else:
             gen.append(nxt)
             context.append(nxt)
-            if len(gen) >= cap:
-                break
-            logits = _step(s, nxt)
-            # sess_step already synced (host logits copy), so this is real wall-clock.
-            var now = perf_counter_ns()
-            if Float64(now - last_beat) >= 5.0e9:
-                var rate = Float64(len(gen)) * 1.0e9 / Float64(now - t_pf)
-                print(
-                    "  decoding: ",
-                    len(gen),
-                    " tokens (",
-                    Int(rate + 0.5),
-                    " tok/s)",
-                    sep="",
-                )
-                last_beat = now
+            var last_tok = nxt
+            while len(gen) < cap:
+                if use_gpu_sel:
+                    var ld = _step_dev(s, last_tok)
+                    var kk = gpu_topk(
+                        s.ctx, ld, s.sel, s.vocab, top_k, DEF_REP, last_tok
+                    )
+                    nxt = sample(process_topk(kk[0], kk[1], temp, top_p), rng)
+                else:
+                    logits = _step(s, last_tok)
+                    nxt = sample(
+                        process_logits(
+                            logits, context, temp, top_k, top_p, DEF_REP
+                        ),
+                        rng,
+                    )
+                if _is_stop(s, nxt):
+                    stopped = True
+                    break
+                gen.append(nxt)
+                context.append(nxt)
+                last_tok = nxt
+                var now = perf_counter_ns()
+                if Float64(now - last_beat) >= 5.0e9:
+                    var rate = Float64(len(gen)) * 1.0e9 / Float64(now - t_pf)
+                    print(
+                        "  decoding: ",
+                        len(gen),
+                        " tokens (",
+                        Int(rate + 0.5),
+                        " tok/s)",
+                        sep="",
+                    )
+                    last_beat = now
     else:
         # Greedy: prompt-lookup speculative decode against the persistent session.
         # Bit-identical to single-step argmax (every committed token is the
@@ -817,9 +898,10 @@ def gen_full(
                 context, SPEC_K, SPEC_NGRAM
             ) if draft_on else List[Int]()
             if len(drafts) == 0:
-                # No draft match (or paused) → single-token step, commits c0's KV.
-                logits = _step(s, c0)
-                c0 = argmax_f(logits)
+                # No draft match (or paused) → single-token step, commits c0's
+                # KV. Logits stay on device; argmax downloads 8 bytes.
+                var ld = _step_dev(s, c0)
+                c0 = gpu_argmax(s.ctx, ld, s.sel, s.vocab)
                 if cooldown > 0:
                     cooldown -= 1
                     if cooldown == 0:
@@ -830,20 +912,24 @@ def gen_full(
                 batch.append(c0)
                 for d in drafts:
                     batch.append(d)
-                var G = _verify(s, batch)  # Q×vocab; session pos unchanged
-                var vocab = len(G) // len(batch)
+                # Q×vocab logits stay on device; per-row argmax on GPU means
+                # verify downloads Q indices instead of Q×vocab floats.
+                var Gd = _verify_dev(s, batch)  # session pos unchanged
+                var preds = gpu_argmax_rows(
+                    s.ctx, Gd, s.sel, len(batch), s.vocab
+                )
                 spec_draft += len(drafts)
                 var accepted = 0
                 var carry = -1
                 for i in range(len(drafts)):
-                    var pred = _argmax_row(G, i, vocab)
+                    var pred = preds[i]
                     if drafts[i] == pred:
                         accepted += 1
                     else:
                         carry = pred
                         break
                 if carry == -1:  # all drafts accepted
-                    carry = _argmax_row(G, len(drafts), vocab)
+                    carry = preds[len(drafts)]
                 # Commit c0 (row at old pos) + accepted drafts; rejected tail is
                 # overwritten by the next forward (linear KV).
                 s.sess.pos = s.sess.pos + 1 + accepted
@@ -2926,6 +3012,16 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
     var banner_model_id = model_id.copy()
     var primary_is_embed = p_arch == 2
 
+    var sel_vocab: Int
+    if model.isa[GemmaWeights]():
+        sel_vocab = model[GemmaWeights].vocab
+    elif model.isa[GemmaE2bWeights]():
+        sel_vocab = model[GemmaE2bWeights].vocab
+    elif model.isa[GemmaE4bWeights]():
+        sel_vocab = model[GemmaE4bWeights].vocab
+    else:
+        sel_vocab = model[Weights].vocab
+    var sel = make_select_bufs(ctx, sel_vocab, SEL_SLOTS)
     var state = ServerState(
         ctx^,
         model^,
@@ -2940,6 +3036,8 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
         embed_w^,
         embed_tok^,
         embed_id^,
+        sel^,
+        sel_vocab,
     )
     var sp = unsafe_alloc[ServerState](1)
     sp.unsafe_write(state^)

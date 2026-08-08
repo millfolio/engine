@@ -61,6 +61,7 @@ test-kernels = "mojo run -I src -I tests/gates tests/gates/test_kernels.mojo"
 # across sizes incl. boundaries, plus the runtime capability probe. Needs the
 # Metal GPU; no fixtures.
 test-simd-gemm = "mojo run -I src -I tests/gates tests/gates/test_simd_gemm.mojo"
+test-topk = "mojo run -I src -I tests/gates tests/gates/test_topk.mojo"
 
 # Phase 2 (§5.1, §11 #5): safetensors parse + bf16→f32 vs torch. Needs loader-capture.
 test-loader = "mojo run -I src -I tests/gates tests/gates/test_loader.mojo"
@@ -107,7 +108,7 @@ test = { depends-on = ["test-toolcall", "test-server-bind", "test-hashing", "tes
 # matmul/RMSNorm/SwiGLU, simdgroup GEMM, and RoPE+GQA attention vs the reference).
 # Needs the Xcode Metal Toolchain (see the gpu-metal-toolchain note). Run as part
 # of the RELEASE preflight; not in the portable pre-push `moon :check`.
-test-gpu = { depends-on = ["build-gpu-hello", "test-kernels", "test-simd-gemm", "test-attention"] }
+test-gpu = { depends-on = ["build-gpu-hello", "test-kernels", "test-simd-gemm", "test-attention", "test-topk"] }
 
 # Disk block KV-cache roundtrip (io/blockcache.mojo): store -> corrupt -> restore
 # bit-identical, chained-hash determinism, collision guard. Needs the GPU.

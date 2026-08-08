@@ -266,6 +266,39 @@ struct GemmaWeights(ModelWeights, Movable):
         ctx.synchronize()
         return download_f32(logits, self.vocab)
 
+    def lm_logits_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Final norm + tied LM head over the LAST row, softcapped; the next-token logits.
+
+        Args:
+            ctx: The GPU device context.
+            h: The hidden-state buffer.
+            T: The number of rows in `h`.
+            dummy: A scratch buffer for unused kernel arguments.
+
+        Returns:
+            The vocab-sized softcapped last-token logits, ON DEVICE (no sync/download).
+
+        Raises:
+            If the LM-head GEMV dispatch or host copy fails.
+        """
+        # Final (1+w) RMSNorm + tied LM head over the last row, then softcap=30.
+        var hl = last_row(ctx, h, T, self.hidden)
+        var logits = mm_norm(
+            ctx,
+            hl,
+            self.final_norm,
+            self.embed,
+            dummy,
+            1,
+            self.hidden,
+            self.vocab,
+            0,
+        )
+        softcap(ctx, logits, self.vocab, G_FINAL_SOFTCAP)
+        return logits^
+
     def lm_logits_all(
         mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
     ) raises -> List[Float32]:
@@ -300,6 +333,40 @@ struct GemmaWeights(ModelWeights, Movable):
         softcap(ctx, logits, n, G_FINAL_SOFTCAP)
         ctx.synchronize()
         return download_f32(logits, n)
+
+    def lm_logits_all_dev(
+        mut self, ctx: DeviceContext, mut h: DevBuf, T: Int, mut dummy: DevBuf
+    ) raises -> DevBuf:
+        """Final norm + tied LM head over ALL `T` rows, softcapped (spec-decode verify).
+
+        Args:
+            ctx: The GPU device context.
+            h: The hidden-state buffer.
+            T: The number of rows in `h`.
+            dummy: A scratch buffer for unused kernel arguments.
+
+        Returns:
+            The `T`×vocab softcapped logits for every row, flattened, ON DEVICE (no sync/download).
+
+        Raises:
+            If the LM-head GEMV dispatch or host copy fails.
+        """
+        # All-row logits for spec-decode verification, with the final softcap=30
+        # applied across every position.
+        var logits = mm_norm(
+            ctx,
+            h,
+            self.final_norm,
+            self.embed,
+            dummy,
+            T,
+            self.hidden,
+            self.vocab,
+            0,
+        )
+        var n = T * self.vocab
+        softcap(ctx, logits, n, G_FINAL_SOFTCAP)
+        return logits^
 
     def token_logprobs(
         mut self,
