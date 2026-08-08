@@ -26,7 +26,14 @@ Package layout:
 Prefer importing from `model`; this facade is the surface to keep stable as the
 packages evolve."""
 
-from runtime.sampling import Dist, process_logits, process_topk, next_rand, sample, argmax_f
+from runtime.sampling import (
+    Dist,
+    process_logits,
+    process_topk,
+    next_rand,
+    sample,
+    argmax_f,
+)
 from runtime.tensor_ops import (
     SelectBufs,
     make_select_bufs,
@@ -48,6 +55,7 @@ from runtime.tensor_ops import (
     mm_w_norm,
     mm_w_silu_add,
     probe_simd_gemm,
+    probe_gemv_w1,
     rmsnorm,
     add,
     silu_mul,

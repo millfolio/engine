@@ -41,6 +41,7 @@ from model import (
     Weights,
     load_weights,
     probe_simd_gemm,
+    probe_gemv_w1,
     EOS1,
     EOS2,
     Session,
@@ -2615,9 +2616,7 @@ def _boot_worker(arg: _OpaquePtr) -> _OpaquePtr:
     variable separating that wedge from the previous architecture (queue
     created + used on the serving thread; never wedged across days of demo
     uptime). One parked thread costs ~500 KB of stack."""
-    var b = Pointer[BootState, MutUntrackedOrigin](
-        unsafe_from_address=Int(arg)
-    )
+    var b = Pointer[BootState, MutUntrackedOrigin](unsafe_from_address=Int(arg))
     try:
         _boot_load(b)
     except e:
@@ -2750,6 +2749,7 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
         # small model that fits ~16 GB. Same gemma tokenizer/template as the 12B.
         var ew = load_e2b_weights(ctx, ckpt_dir)  # q4=True default
         ew.simd_ok = probe_simd_gemm(ctx)
+        probe_gemv_w1(ctx)
         p_cfg = ew.config()
         p_nlayers = p_cfg.nlayers
         p_nkv = p_cfg.nkv
@@ -2779,6 +2779,7 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
         # int4 projections by default; bf16 embed + PLE tables dominate memory.
         var fw = load_e4b_weights(ctx, ckpt_dir)  # q4=True default
         fw.simd_ok = probe_simd_gemm(ctx)
+        probe_gemv_w1(ctx)
         p_cfg = fw.config()
         p_nlayers = p_cfg.nlayers
         p_nkv = p_cfg.nkv
@@ -2810,6 +2811,7 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
             alllayers.append(i)
         var gw = load_gemma_weights(ctx, ckpt, alllayers, True)
         gw.simd_ok = probe_simd_gemm(ctx)
+        probe_gemv_w1(ctx)
         p_cfg = gw.config()
         p_nlayers = p_cfg.nlayers
         p_nkv = p_cfg.nkv
@@ -2841,6 +2843,7 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
         # Probe the simdgroup-matrix GEMM once; on success prefill GEMMs take the
         # ~4.5× faster path, else fall back to the scalar tiled kernel (see mm()).
         w.simd_ok = probe_simd_gemm(ctx)
+        probe_gemv_w1(ctx)
         p_cfg = w.config()
         p_nlayers = p_cfg.nlayers
         p_nkv = p_cfg.nkv
@@ -3051,9 +3054,7 @@ def _boot_load(b: Pointer[BootState, MutUntrackedOrigin]) raises:
     # Publish: from the next request on, BootApi delegates to Api(sp) and the
     # reactor thread owns all GPU work (sequential handoff via the fence).
     b[].sp = Optional[Pointer[ServerState, MutUntrackedOrigin]](
-        Pointer[ServerState, MutUntrackedOrigin](
-            unsafe_from_address=Int(sp)
-        )
+        Pointer[ServerState, MutUntrackedOrigin](unsafe_from_address=Int(sp))
     )
     fence()
     b[].state = BOOT_READY

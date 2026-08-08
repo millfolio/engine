@@ -7,6 +7,8 @@ No model-specific constants: every op takes its dims at the call site."""
 
 from std.math import ceildiv
 from std.memory import unsafe_memcpy
+from std.time import perf_counter_ns
+from std.ffi import _Global
 from std.gpu import WARP_SIZE
 from max.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
@@ -325,21 +327,38 @@ def mm_w(
         # wins (67); at long K (down 11008) plain streams best (79 vs 68) —
         # route on K. The rw kernels stay in src/kernels for the next re-tune.
         if K <= 4096 and N >= 2048:
-            comptime kmr = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
-            cached_enqueue[kmr](
-                ctx,
-                xt,
-                pt,
-                st,
-                bt,
-                yt,
-                Int32(K),
-                Int32(N),
-                Int32(NG),
-                Int32(use_bias),
-                grid_dim=ceildiv(N, 2),
-                block_dim=4 * WARP_SIZE,
-            )
+            if gemv_w1():
+                comptime kmr1 = matmul_q4_mrw_kernel[type_of(lay), 2, 1]
+                cached_enqueue[kmr1](
+                    ctx,
+                    xt,
+                    pt,
+                    st,
+                    bt,
+                    yt,
+                    Int32(K),
+                    Int32(N),
+                    Int32(NG),
+                    Int32(use_bias),
+                    grid_dim=ceildiv(N, 2),
+                    block_dim=1 * WARP_SIZE,
+                )
+            else:
+                comptime kmr = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+                cached_enqueue[kmr](
+                    ctx,
+                    xt,
+                    pt,
+                    st,
+                    bt,
+                    yt,
+                    Int32(K),
+                    Int32(N),
+                    Int32(NG),
+                    Int32(use_bias),
+                    grid_dim=ceildiv(N, 2),
+                    block_dim=4 * WARP_SIZE,
+                )
         else:
             comptime k = matmul_q4_kernel[type_of(lay)]
             cached_enqueue[k](
@@ -722,7 +741,26 @@ def mm_w_norm(
         # R=4 wins the small-N shapes (qkv 68 vs 58 at R=2), R=2 wins the
         # big-N ones (gate_up 94 vs 84, lm_head 92 vs 90).
         var xn = rmsnorm(ctx, x, lnw, M, K)
-        if N >= 8192:
+        if gemv_w1():
+            # M2-class: single-warp row pairs, no cross-warp reduction —
+            # wins EVERY decode shape there (gate_up 91 vs 47 GB/s,
+            # lm_head 99 vs 49; gemv-mlp-race 2026-08-08 on the M2 Pro).
+            comptime km1 = matmul_q4_mrw_kernel[type_of(lay), 2, 1]
+            cached_enqueue[km1](
+                ctx,
+                TileTensor(xn, row_major(M * K)),
+                TileTensor(w.packed, row_major(N * K // 8)),
+                TileTensor(w.scales, row_major(N * NG)),
+                TileTensor(b, row_major(N if use_bias != 0 else 1)),
+                TileTensor(y, lay),
+                Int32(K),
+                Int32(N),
+                Int32(NG),
+                Int32(use_bias),
+                grid_dim=ceildiv(N, 2),
+                block_dim=1 * WARP_SIZE,
+            )
+        elif N >= 8192:
             comptime km = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
             cached_enqueue[km](
                 ctx,
@@ -825,21 +863,39 @@ def mm_w_silu_add(
         # race's plain column.
         var NG = inter // Q4_GROUP
         var act = silu_mul_cat(ctx, gu, M, inter)
-        comptime kq = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
-        cached_enqueue[kq](
-            ctx,
-            TileTensor(act, row_major(M * inter)),
-            TileTensor(w.packed, row_major(N * inter // 8)),
-            TileTensor(w.scales, row_major(N * NG)),
-            TileTensor(resid, lay),
-            TileTensor(y, lay),
-            Int32(inter),
-            Int32(N),
-            Int32(NG),
-            Int32(1),
-            grid_dim=ceildiv(N, 2),
-            block_dim=4 * WARP_SIZE,
-        )
+        if gemv_w1():
+            # M2-class: down at W=1 measures 82 vs 69 GB/s (M2 Pro race).
+            comptime kq1 = matmul_q4_mrw_kernel[type_of(lay), 2, 1]
+            cached_enqueue[kq1](
+                ctx,
+                TileTensor(act, row_major(M * inter)),
+                TileTensor(w.packed, row_major(N * inter // 8)),
+                TileTensor(w.scales, row_major(N * NG)),
+                TileTensor(resid, lay),
+                TileTensor(y, lay),
+                Int32(inter),
+                Int32(N),
+                Int32(NG),
+                Int32(1),
+                grid_dim=ceildiv(N, 2),
+                block_dim=1 * WARP_SIZE,
+            )
+        else:
+            comptime kq = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+            cached_enqueue[kq](
+                ctx,
+                TileTensor(act, row_major(M * inter)),
+                TileTensor(w.packed, row_major(N * inter // 8)),
+                TileTensor(w.scales, row_major(N * NG)),
+                TileTensor(resid, lay),
+                TileTensor(y, lay),
+                Int32(inter),
+                Int32(N),
+                Int32(NG),
+                Int32(1),
+                grid_dim=ceildiv(N, 2),
+                block_dim=4 * WARP_SIZE,
+            )
     else:
         comptime kb = matmul_silu_resid_kernel[type_of(lay)]
         cached_enqueue[kb](
@@ -855,6 +911,139 @@ def mm_w_silu_add(
             block_dim=BLOCK,
         )
     return y^
+
+
+def _gemv_w1_unset() -> Int:
+    return -1  # -1 = not probed yet; 0 = W=4 routing (M4-class); 1 = W=1
+
+
+def gemv_w1() -> Bool:
+    """True when the boot probe chose W=1 decode-GEMV routing (M2-class GPUs
+    where the mrw kernel's cross-warp reduction dominates). False before the
+    probe runs and on M4-class GPUs."""
+    try:
+        return (
+            _Global["gemv_w1_flag", _gemv_w1_unset].get_or_create_ptr()[] == 1
+        )
+    except:
+        return False
+
+
+def probe_gemv_w1(ctx: DeviceContext) raises:
+    """One-time boot probe: race mrw[2,4] vs mrw[2,1] on a synthetic decode
+    shape and set the process-lifetime W routing flag. gemv-mlp-race
+    (2026-08-08): the cross-warp shared-memory reduction that W=4 pays is
+    the M2-generation killer — mrw[2,1] wins EVERY decode shape there
+    (gate_up 91 vs 47 GB/s, lm_head 99 vs 49) while the M4 prefers W=4 on
+    its chain-visible big-N kernels (gate_up 94 vs 83). A data-driven probe
+    beats a device-name table and covers future GPU generations. ~2 ms,
+    idempotent; requires only the GPU (no weights).
+
+    Args:
+        ctx: The GPU device context to probe.
+
+    Raises:
+        If buffer allocation or a probe launch fails.
+    """
+    var slot = _Global["gemv_w1_flag", _gemv_w1_unset].get_or_create_ptr()
+    if slot[] != -1:
+        return
+    var K = 2048
+    var N = 4096
+    var NG = K // Q4_GROUP
+    var xb = ctx.enqueue_create_buffer[DType.float32](K)
+    var pb = ctx.enqueue_create_buffer[DType.uint32](N * K // 8)
+    var sb = ctx.enqueue_create_buffer[DType.float32](N * NG)
+    var bb = ctx.enqueue_create_buffer[DType.float32](1)
+    var yb = ctx.enqueue_create_buffer[DType.float32](N)
+    xb.enqueue_fill(0.5)
+    pb.enqueue_fill(0x93A5C176)
+    sb.enqueue_fill(0.01)
+    bb.enqueue_fill(0.0)
+    yb.enqueue_fill(0.0)
+    var lay = row_major(N)
+    var xt = TileTensor(xb, row_major(K))
+    var pt = TileTensor(pb, row_major(N * K // 8))
+    var st = TileTensor(sb, row_major(N * NG))
+    var bt = TileTensor(bb, row_major(1))
+    var yt = TileTensor(yb, lay)
+    comptime k24 = matmul_q4_mrw_kernel[type_of(lay), 2, 4]
+    comptime k21 = matmul_q4_mrw_kernel[type_of(lay), 2, 1]
+    comptime ITERS = 20
+    for _ in range(5):
+        cached_enqueue[k24](
+            ctx,
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(0),
+            grid_dim=ceildiv(N, 2),
+            block_dim=4 * WARP_SIZE,
+        )
+        cached_enqueue[k21](
+            ctx,
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(0),
+            grid_dim=ceildiv(N, 2),
+            block_dim=1 * WARP_SIZE,
+        )
+    ctx.synchronize()
+    var t0 = perf_counter_ns()
+    for _ in range(ITERS):
+        cached_enqueue[k24](
+            ctx,
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(0),
+            grid_dim=ceildiv(N, 2),
+            block_dim=4 * WARP_SIZE,
+        )
+    ctx.synchronize()
+    var t24 = perf_counter_ns() - t0
+    var t1 = perf_counter_ns()
+    for _ in range(ITERS):
+        cached_enqueue[k21](
+            ctx,
+            xt,
+            pt,
+            st,
+            bt,
+            yt,
+            Int32(K),
+            Int32(N),
+            Int32(NG),
+            Int32(0),
+            grid_dim=ceildiv(N, 2),
+            block_dim=1 * WARP_SIZE,
+        )
+    ctx.synchronize()
+    var t21 = perf_counter_ns() - t1
+    # W=1 must win by >15% to switch (M2 Pro measures ~1.9x; M4 ~0.88x).
+    var w1 = Float64(t21) * 1.15 < Float64(t24)
+    slot[] = 1 if w1 else 0
+    print(
+        "  decode GEMV routing: ",
+        "W=1 (cross-warp reduction is slow on this GPU)" if w1 else "W=4",
+        sep="",
+    )
 
 
 def probe_simd_gemm(ctx: DeviceContext) raises -> Bool:

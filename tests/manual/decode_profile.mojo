@@ -21,6 +21,7 @@ from std.math import log, exp
 
 from model import (
     load_weights,
+    probe_gemv_w1,
     new_session,
     sess_prefill,
     sess_step,
@@ -45,6 +46,7 @@ def to_bytes(s: String) -> List[UInt8]:
     for i in range(len(b)):
         out.append(b[i])
     return out^
+
 
 comptime PROFILE_STEPS = 32
 
@@ -83,12 +85,19 @@ def main() raises:
 
     print("loading int4 weights…")
     var w = load_weights(ctx, ckpt, True)
+    probe_gemv_w1(ctx)
     var nlayers = w.config().nlayers
     var s = new_session(ctx, len(ids) + PROFILE_STEPS + 8, nlayers, w.nkv)
     var lg = sess_prefill(ctx, w, s, ids)
     var nxt = argmax_f(lg)
-    print("prefilled ", len(ids), " tokens; profiling ", PROFILE_STEPS,
-          " decode steps…", sep="")
+    print(
+        "prefilled ",
+        len(ids),
+        " tokens; profiling ",
+        PROFILE_STEPS,
+        " decode steps…",
+        sep="",
+    )
 
     # Ground truth first: whole steps, no internal syncs (production shape).
     var whole = List[Float64]()
@@ -127,8 +136,14 @@ def main() raises:
         t_host.append(Float64(t4 - t3) / 1.0e6)
 
     var wm = med(whole)
-    print("whole step (no syncs, production shape): ", wm, " ms  = ",
-          1000.0 / wm, " tok/s", sep="")
+    print(
+        "whole step (no syncs, production shape): ",
+        wm,
+        " ms  = ",
+        1000.0 / wm,
+        " tok/s",
+        sep="",
+    )
     print("attributed phases (sync at boundaries — upper bounds):")
     print("  embed+upload : ", med(t_embed), " ms", sep="")
     print("  ", nlayers, " layers    : ", med(t_layers), " ms", sep="")
