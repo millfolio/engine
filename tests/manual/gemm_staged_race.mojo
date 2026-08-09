@@ -49,6 +49,47 @@ def _mma_v64(
     ](a, b, c)
 
 
+def _p3_probe_kernel[
+    LT: TensorLayout
+](Out: TileTensor[DType.float16, LT, MutAnyOrigin]):
+    """Minimal kernel forcing pipeline creation with a p3 hw tile load."""
+    comptime assert Out.flat_rank == 1
+    var lane = Int(thread_idx.x) % 32
+    var Ts = stack_allocation[64, Float16, address_space=AddressSpace.SHARED]()
+    if lane < 32:
+        Ts[unsafe_offset=lane] = Float16(lane)
+        Ts[unsafe_offset=lane + 32] = Float16(lane + 32)
+    barrier()
+    var v = external_call[
+        "air.simdgroup_matrix_8x8_load.v64f16.p3f16",
+        SIMD[DType.float16, 64],
+    ](
+        Ts,
+        SIMD[DType.int64, 2](8, 8),
+        SIMD[DType.int64, 2](1, 8),
+        SIMD[DType.int64, 2](0, 0),
+    )
+    Out[lane * 2] = rebind[Out.ElementType](v[0])
+    Out[lane * 2 + 1] = rebind[Out.ElementType](v[1])
+
+
+def p3_supported(ctx: DeviceContext) -> Bool:
+    """True if this GPU's backend can compile the p3 hardware tile load.
+    The M2-generation Metal backend CRASHES (XPC_ERROR_CONNECTION_
+    INTERRUPTED at pipeline creation) on it — surfaces as a catchable
+    error, same pattern as probe_simd_gemm."""
+    try:
+        var ob = ctx.enqueue_create_buffer[DType.float16](64)
+        ob.enqueue_fill(0.0)
+        var ot = TileTensor(ob, row_major(64))
+        comptime k = _p3_probe_kernel[type_of(row_major(1))]
+        ctx.enqueue_function[k](ot, grid_dim=1, block_dim=32)
+        ctx.synchronize()
+        return True
+    except:
+        return False
+
+
 def gemm_staged_kernel[
     LT: TensorLayout, BK: Int
 ](
@@ -341,7 +382,14 @@ def bench[
         print("    ", name, ": ", ms, " ms  ", tf, " TFLOP/s", sep="")
 
 
-def run_shape(ctx: DeviceContext, label: String, M: Int, N: Int, K: Int) raises:
+def run_shape(
+    ctx: DeviceContext,
+    label: String,
+    M: Int,
+    N: Int,
+    K: Int,
+    staged_ok: Bool,
+) raises:
     print("  ", label, " M=", M, " N=", N, " K=", K, sep="")
     var xb = ctx.enqueue_create_buffer[DType.float16](M * K)
     var wb = ctx.enqueue_create_buffer[DType.float16](K * N)
@@ -365,6 +413,12 @@ def run_shape(ctx: DeviceContext, label: String, M: Int, N: Int, K: Int) raises:
                 ]()
             )
     bench[False, 0](ctx, "direct (ship) ", xb, wb, y0, M, N, K)
+    if not staged_ok:
+        print(
+            "    staged: SKIPPED — Metal backend crashed compiling the p3"
+            " tile load for this GPU (M2-generation backend bug)"
+        )
+        return
     bench[True, 16](ctx, "staged BK=16  ", xb, wb, y1, M, N, K)
     var r16 = rel_rms(y1, y0, M * N)
     bench[True, 32](ctx, "staged BK=32  ", xb, wb, y1, M, N, K)
@@ -375,6 +429,12 @@ def run_shape(ctx: DeviceContext, label: String, M: Int, N: Int, K: Int) raises:
 def main() raises:
     var ctx = DeviceContext()
     print("staged (steel-pattern, p3 hw loads) vs direct loads — f16 GEMM")
-    run_shape(ctx, "gate_up", 1536, 22016, 2048)
-    run_shape(ctx, "down   ", 1536, 2048, 11008)
-    run_shape(ctx, "qkv    ", 1536, 2560, 2048)
+    var staged_ok = p3_supported(ctx)
+    if not staged_ok:
+        print(
+            "  p3 hardware tile load: BACKEND COMPILE CRASH on this GPU —"
+            " staged variants will be skipped (direct baseline still runs)"
+        )
+    run_shape(ctx, "gate_up", 1536, 22016, 2048, staged_ok)
+    run_shape(ctx, "down   ", 1536, 2048, 11008, staged_ok)
+    run_shape(ctx, "qkv    ", 1536, 2560, 2048, staged_ok)
