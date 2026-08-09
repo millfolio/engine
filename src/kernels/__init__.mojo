@@ -759,40 +759,74 @@ def matmul_hkn_kernel[
     # earlier per-K-step `ktail` guard was dead weight — removing it is worth
     # ~4% (race: .scratch/gemm_tune.mojo, 3.07 -> 3.18 TFLOP/s).
     var nkt = K // _MMA8
-    for ks in range(nkt):
-        var kk = ks * _MMA8
-        # A (X) is bf16 [M,K] row-major: lane's 2 frag elems are consecutive K
-        # cols kk+fcol, kk+fcol+1 (always in-bounds in K).
-        var afrag = InlineArray[SIMD[T, _FRAG8], _SG_NTM](uninitialized=True)
-        comptime for mi in range(_SG_NTM):
-            var grow = row_base + mi * _MMA8 + frow
-            if interior or grow < M:
+    # The guard branch is hoisted OUT of the K-loop: interior subtiles (the
+    # vast majority at prefill shapes — M=1570 has 24 full block-rows and one
+    # edge strip) run a completely unguarded loop. The per-fragment
+    # `interior or in-bounds` checks measured ~8% (air_gemm_race 2026-08-09:
+    # interior-only 3.45 TFLOP/s vs 3.18 shipped).
+    if interior:
+        for ks in range(nkt):
+            var kk = ks * _MMA8
+            var afrag = InlineArray[SIMD[T, _FRAG8], _SG_NTM](
+                uninitialized=True
+            )
+            comptime for mi in range(_SG_NTM):
+                var grow = row_base + mi * _MMA8 + frow
                 afrag[mi] = xp.unsafe_offset(grow * K + kk + fcol).unsafe_load[
                     width=_FRAG8
                 ]()
-            else:
-                afrag[mi] = SIMD[T, _FRAG8](0)
-        # B (W) is bf16 [K,N]: B[k_idx, j] = W[k_idx*N + j]; frag slots are
-        # consecutive j → one 2-wide vector load. Col needs an N bound on
-        # edge subtiles; the K row is always in-bounds.
-        var bfrag = InlineArray[SIMD[T, _FRAG8], _SG_NTN](uninitialized=True)
-        comptime for ni in range(_SG_NTN):
-            var krow = kk + frow
-            var gj = col_base + ni * _MMA8 + fcol
-            if interior or gj + 1 < N:
-                bfrag[ni] = wp.unsafe_offset(krow * N + gj).unsafe_load[
+            var bfrag = InlineArray[SIMD[T, _FRAG8], _SG_NTN](
+                uninitialized=True
+            )
+            comptime for ni in range(_SG_NTN):
+                var gj = col_base + ni * _MMA8 + fcol
+                bfrag[ni] = wp.unsafe_offset((kk + frow) * N + gj).unsafe_load[
                     width=_FRAG8
                 ]()
-            else:
-                var bf = SIMD[T, _FRAG8](0)
-                if gj < N:
-                    bf[0] = wp[unsafe_offset=krow * N + gj]
-                bfrag[ni] = bf
-        comptime for mi in range(_SG_NTM):
+            comptime for mi in range(_SG_NTM):
+                comptime for ni in range(_SG_NTN):
+                    acc[mi * _SG_NTN + ni] = _mma8x8_h[T](
+                        afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
+                    )
+    else:
+        for ks in range(nkt):
+            var kk = ks * _MMA8
+            # A (X) is [M,K] row-major: lane's 2 frag elems are consecutive K
+            # cols kk+fcol, kk+fcol+1 (always in-bounds in K).
+            var afrag = InlineArray[SIMD[T, _FRAG8], _SG_NTM](
+                uninitialized=True
+            )
+            comptime for mi in range(_SG_NTM):
+                var grow = row_base + mi * _MMA8 + frow
+                if grow < M:
+                    afrag[mi] = xp.unsafe_offset(
+                        grow * K + kk + fcol
+                    ).unsafe_load[width=_FRAG8]()
+                else:
+                    afrag[mi] = SIMD[T, _FRAG8](0)
+            # B (W) is [K,N]: B[k_idx, j] = W[k_idx*N + j]; frag slots are
+            # consecutive j → one 2-wide vector load. Col needs an N bound on
+            # edge subtiles; the K row is always in-bounds.
+            var bfrag = InlineArray[SIMD[T, _FRAG8], _SG_NTN](
+                uninitialized=True
+            )
             comptime for ni in range(_SG_NTN):
-                acc[mi * _SG_NTN + ni] = _mma8x8_h[T](
-                    afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
-                )
+                var krow = kk + frow
+                var gj = col_base + ni * _MMA8 + fcol
+                if gj + 1 < N:
+                    bfrag[ni] = wp.unsafe_offset(krow * N + gj).unsafe_load[
+                        width=_FRAG8
+                    ]()
+                else:
+                    var bf = SIMD[T, _FRAG8](0)
+                    if gj < N:
+                        bf[0] = wp[unsafe_offset=krow * N + gj]
+                    bfrag[ni] = bf
+            comptime for mi in range(_SG_NTM):
+                comptime for ni in range(_SG_NTN):
+                    acc[mi * _SG_NTN + ni] = _mma8x8_h[T](
+                        afrag[mi], bfrag[ni], acc[mi * _SG_NTN + ni]
+                    )
 
     comptime for mi in range(_SG_NTM):
         comptime for ni in range(_SG_NTN):
