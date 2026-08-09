@@ -13,10 +13,10 @@ channels = [
 platforms = ["osx-arm64"]
 
 [dependencies]
-mojo = "==1.0.0rc0"
+mojo = "==1.0.0rc3"
 # The `max` Mojo package: std.gpu.{compute,host,memory,sync} moved there in
 # the 1.0 cycle (DeviceContext & friends). Keep in lockstep with the mojo pin.
-max = "==26.5.0rc0"
+max = "==26.5.0rc3"
 
 # The conformance oracle (ARCHITECTURE.md §7) — a SEPARATE environment so the
 # default build stays Mojo-only and fast. transformers/torch on CPU/f32 is the
