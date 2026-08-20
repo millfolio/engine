@@ -276,6 +276,15 @@ def parse_tool_calls(text: String) raises -> ParsedReply:
         content += _slice(b, pos, o)  # text before the tag
         var inner_start = o + len(OPEN)
         var c = _find(b, CLOSE, inner_start)
+        # Small models sometimes repeat the opening tag (`<tool_call>\n<tool_call>\n{…}`
+        # — seen from Qwen2.5-3B driving an agent loop). Advance to the innermost open
+        # before the close, otherwise the body still carries a literal tag, fails both
+        # the strict and the repair parse, and a well-formed call is dropped to text.
+        var bound = c if c >= 0 else n
+        var o2 = _find(b, OPEN, inner_start)
+        while o2 >= 0 and o2 < bound:
+            inner_start = o2 + len(OPEN)
+            o2 = _find(b, OPEN, inner_start)
         if c < 0:
             # no closing tag (truncated): try to recover the partial call, else verbatim
             if not _extract_call(_slice(b, inner_start, n), calls):

@@ -90,6 +90,10 @@ comptime EOS1 = 151645
 """Primary end-of-sequence token id."""
 comptime EOS2 = 151643
 """Secondary end-of-sequence token id."""
+comptime IM_START = 151644
+"""ChatML turn-open token id (`<|im_start|>`), used as an extra stop: a small model
+that opens a new turn instead of closing its own would otherwise run on and
+generate a fabricated user turn (seen driving agentic harnesses off Qwen2.5-3B)."""
 
 # Above this context length (keys = q_offset + Tq) the f32 KV working set spills
 # the M4 system cache and attn_cached_kernel super-cliffs; flash_attn_kernel
@@ -681,7 +685,7 @@ def load_weights(
         EOS1,
         EOS2,
         TOOL_QWEN,
-        -1,
+        IM_START,
     )
     return Weights(
         embed^,

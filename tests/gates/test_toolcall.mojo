@@ -119,6 +119,30 @@ def main() raises:
         all_ok,
     )
 
+    # 7b. repeated opening tag (`<tool_call>\n<tool_call>\n{…}`, seen from
+    # Qwen2.5-3B in an agent loop) -> innermost open wins, call still lifted.
+    # Read the call out defensively so a regression FAILs instead of crashing
+    # on an empty `calls` index.
+    var r7b = parse_tool_calls(
+        String(
+            'sure, patching now.\n<tool_call>\n<tool_call>\n{"name": "patch",'
+            ' "arguments": {"path": "a.py"}}\n</tool_call>'
+        )
+    )
+    var got7b = String("<none>")
+    if r7b.has_calls():
+        got7b = r7b.calls[0].name + "|" + r7b.calls[0].arguments
+    expect(
+        got7b.find("patch") >= 0 and got7b.find("a.py") >= 0,
+        "7b: repeated open tag lifted, got=" + got7b,
+        all_ok,
+    )
+    expect(
+        r7b.content.find("<tool_call>") < 0,
+        "7b: no tag left in content=" + r7b.content,
+        all_ok,
+    )
+
     # 8. trailing comma -> repaired
     var r8 = parse_tool_calls(
         String(
