@@ -16,7 +16,7 @@ jobs:
     runs-on: macos-14
     steps:
       # Lay the repos out as siblings, matching the `-I ../flare -I ../json
-      # -I ../jinja2.mojo/src` the gates build against.
+      #` the gates build against.
       - uses: actions/checkout@v6
         with: { path: engine }
       - uses: actions/checkout@v6

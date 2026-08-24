@@ -9,9 +9,9 @@ Built with `-I ../jinja2.mojo/src` so jinja2.mojo's modules resolve (it compiles
 under the same 1.0.0b2 nightly the GPU engine needs — unlike flare, §11 #11).
 """
 
-from template import Template
-from value import Value
-from json import parse_json, bytes_to_string, string_to_bytes
+from jinja2 import Template
+from jinja2 import Value
+from jinja2 import parse_json, bytes_to_string, string_to_bytes
 from runtime.model_iface import FAMILY_QWEN, FAMILY_GEMMA
 from chat.gemma_chat import render_gemma
 

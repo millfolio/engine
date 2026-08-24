@@ -16,8 +16,8 @@ is returned as the message `content`; a block that isn't valid JSON (or lacks a
 Pure CPU + JSON only (no GPU) — unit-tested via `pixi run test-toolcall`.
 """
 
-from json import parse_json, to_json, string_to_bytes, bytes_to_string
-from value import Value, VSTR
+from jinja2 import parse_json, to_json, string_to_bytes, bytes_to_string
+from jinja2 import Value, VSTR
 
 # Gemma 4 generated tool-call markers (single control tokens; decode to this
 # literal text). Args use Gemma's serialization (NOT JSON): bare keys, strings

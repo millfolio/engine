@@ -14,7 +14,7 @@ Two loaders build the same `Tokenizer`:
                                     downloaded checkpoint serves with no tok-capture.
 """
 
-from json import parse_json
+from jinja2 import parse_json
 
 comptime MUL = 1 << 20  # pair key = left*MUL + right (ids < 262144 for Gemma,
 # < 151936 for Qwen; 1<<20 == 1048576 exceeds both)

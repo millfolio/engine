@@ -19,10 +19,10 @@ from runtime.engine import (
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
 from runtime.tensor_ops import probe_simd_gemm
-from template import Template
+from jinja2 import Template
 from runtime.model_iface import FAMILY_GEMMA
 from chat.toolcall import parse_gemma_tool_calls
-from json import parse_json
+from jinja2 import parse_json
 
 comptime GEMMA_MAX_SEQ = 4096  # mirror server.GEMMA_MAX_SEQ
 comptime TMPL = (  # placeholder; render_value(FAMILY_GEMMA) renders in Mojo

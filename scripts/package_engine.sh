@@ -10,7 +10,7 @@
 #   flare/flare/    vendored flare package (HTTP server)
 #
 # so the app can run:
-#   (cd inference-server && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/server)
+#   (cd inference-server && mojo build src/server.mojo -I ../flare -o build/server)
 #
 # We ship the prebuilt libflare_tls.so (building it needs clang + OpenSSL) and
 # its OpenSSL dylibs, made relocatable via @loader_path so the server finds them

@@ -7,7 +7,7 @@ Covers text, thinking, tool definitions, assistant tool_calls, and tool results
 """
 
 from chat.gemma_chat import render_gemma
-from json import parse_json
+from jinja2 import parse_json
 
 comptime CASES = "tests/fixtures/gemma/chat_cases.json"
 

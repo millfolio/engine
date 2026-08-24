@@ -15,7 +15,7 @@ quote token. Covers string+enum, number, boolean, array(items), nested object,
 nullable, required — the macro branches.
 """
 
-from value import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
+from jinja2 import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
 
 comptime Q = '<|"|>'  # the gemma quote control token
 """The Gemma quote control token."""

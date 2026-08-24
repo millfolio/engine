@@ -26,9 +26,9 @@ from runtime.engine import (
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
 from runtime.tensor_ops import probe_simd_gemm
-from template import Template
+from jinja2 import Template
 from runtime.model_iface import FAMILY_GEMMA
-from json import parse_json
+from jinja2 import parse_json
 
 comptime SNAP = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-12B-it-bf16/snapshots/afb7b215e9fe3b3eaef462b27d5c9d9b1ba0565b"
 comptime TMPL = (  # placeholder; render_value(FAMILY_GEMMA) renders in Mojo

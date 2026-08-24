@@ -16,7 +16,7 @@ from max.gpu.host import DeviceContext
 from model import load_weights, generate, probe_simd_gemm, EOS1, EOS2
 from tokenizer import load_tokenizer
 from chat import load_chat_template, render_chat
-from json import bytes_to_string
+from jinja2 import bytes_to_string
 
 comptime MAX_NEW = 48
 comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"

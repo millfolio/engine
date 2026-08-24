@@ -20,7 +20,7 @@ from max.gpu.host import DeviceContext
 from model import load_weights, generate, EOS1, EOS2
 from tokenizer import load_tokenizer
 from chat import load_chat_template, render_chat
-from json import bytes_to_string
+from jinja2 import bytes_to_string
 
 comptime MAX_NEW = 64
 """Maximum number of new tokens to generate for the prompt."""

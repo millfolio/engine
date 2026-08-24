@@ -32,7 +32,7 @@ from model import (
 from kernels import bf16_widen
 from tokenizer import load_tokenizer, Tokenizer
 from chat import load_chat_template, render_chat
-from json import bytes_to_string
+from jinja2 import bytes_to_string
 
 comptime MAX_NEW = 96
 comptime TEMPLATE = "assets/qwen2.5-chat-template.jinja"

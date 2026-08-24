@@ -89,9 +89,9 @@ from tokenizer import (
     load_gemma_tokenizer_json,
 )
 from chat import load_chat_template, render_value, json_escape_str
-from template import Template
-from value import Value
-from json import parse_json, bytes_to_string
+from jinja2 import Template
+from jinja2 import Value
+from jinja2 import parse_json, bytes_to_string
 from runtime.decode_health import record_decode, decode_status_fields
 
 # Persistent KV-cache capacity (tokens). One Session of this size lives on

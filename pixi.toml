@@ -6,6 +6,7 @@ description = "Native-Mojo GPU re-implementation of millfolio inference: a hardc
 # Nightly Mojo: we need the current std.gpu / TileTensor GPU API (per the
 # modular `mojo-gpu-fundamentals` skill). No flare/MAX runtime dep yet — the
 # engine is pure Mojo (ARCHITECTURE.md §1, §8); serving is Phase 6.
+preview = ["pixi-build"]
 channels = [
     "https://conda.modular.com/max-nightly",
     "conda-forge",
@@ -17,6 +18,7 @@ mojo = "==1.0.0"
 # The `max` Mojo package: std.gpu.{compute,host,memory,sync} moved there in
 # the 1.0 cycle (DeviceContext & friends). Keep in lockstep with the mojo pin.
 max = "==26.5.0"
+jinja2-mojo = { git = "https://github.com/millfolio/jinja2.mojo.git", rev = "44c54562c63fd9c6073da58a2129d75adf312801" }
 
 # The conformance oracle (ARCHITECTURE.md §7) — a SEPARATE environment so the
 # default build stays Mojo-only and fast. transformers/torch on CPU/f32 is the
@@ -82,9 +84,9 @@ test-generate = { cmd = "mkdir -p build && mojo build -I src -I tests/gates test
 test-sample = "mojo run -I src -I tests/gates tests/gates/test_sample.mojo"
 
 # Phase 6b tool-calling: parse the model's <tool_call> blocks into structured
-# calls (chat/toolcall.mojo). Pure CPU + JSON, no GPU/fixtures. -I ../jinja2.mojo/src
+# calls (chat/toolcall.mojo). Pure CPU + JSON, no GPU/fixtures.
 # for the JSON parser/serializer. (No testio, so no -I tests/gates needed.)
-test-toolcall = "mojo run -I ../jinja2.mojo/src -I src tests/gates/test_toolcall.mojo"
+test-toolcall = "mojo run -I src tests/gates/test_toolcall.mojo"
 
 # The server binds + listen()s before loading weights, so connections during the
 # load are queued (not refused). Pure CPU (loopback sockets), no GPU/weights.
@@ -117,7 +119,7 @@ test-blockcache = "mojo run -I src -I tests/gates tests/gates/test_blockcache.mo
 # Manual GPU gate: greedy-parity of the simdgroup-matrix prefill GEMM — generate
 # the same prompt with the scalar vs simd GEMM and assert identical tokens. Needs
 # weights + Metal GPU. Usage: pixi run simd-parity [-- "prompt"].
-simd-parity = { cmd = "mojo build tests/manual/simd_parity.mojo -I src -I ../jinja2.mojo/src -o build/simd_parity && ./build/simd_parity" }
+simd-parity = { cmd = "mojo build tests/manual/simd_parity.mojo -I src -o build/simd_parity && ./build/simd_parity" }
 
 # Manual GPU gate: Qwen3-Embedding-0.6B numerical conformance. Runs sess_embed for
 # the ids in tests/fixtures/embed/ids.txt and asserts cosine >= 0.999 vs the torch
@@ -145,31 +147,31 @@ gemv-mlp-race = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemv_mlp.m
 # loads. M4 verdict: staging LOSES ~30% — run on M2-class GPUs where the
 # f16 GEMM sits at ~58% of ALU peak (vs 90% M4). GPU only, no weights.
 gemm-staged-race = { cmd = "mkdir -p build && mojo build tests/manual/gemm_staged_race.mojo -I src -o build/gemm_staged_race && ./build/gemm_staged_race" }
-decode-profile = { cmd = "mkdir -p build && mojo build tests/manual/decode_profile.mojo -I src -I ../jinja2.mojo/src -o build/decode_profile && ./build/decode_profile" }
-mega-parity = { cmd = "mkdir -p build && mojo build tests/manual/mega_parity.mojo -I src -I ../jinja2.mojo/src -o build/mega_parity && ./build/mega_parity" }
+decode-profile = { cmd = "mkdir -p build && mojo build tests/manual/decode_profile.mojo -I src -o build/decode_profile && ./build/decode_profile" }
+mega-parity = { cmd = "mkdir -p build && mojo build tests/manual/mega_parity.mojo -I src -o build/mega_parity && ./build/mega_parity" }
 q4-gemm-f16 = { cmd = "mkdir -p build && mojo build tests/manual/q4_gemm_f16.mojo -I src -o build/q4_gemm_f16 && ./build/q4_gemm_f16" }
 # Prefill-GEMM operand-dtype race (f32/bf16/f16) — per-machine: decides the
 # dequant-scratch dtype (bf16 suspected emulated/slow on pre-M3 GPUs, f16
 # native since M1). GPU only, no weights.
 gemm-dtype-race = { cmd = "mkdir -p build && mojo build tests/manual/gemm_dtype_race.mojo -I src -o build/gemm_dtype_race && ./build/gemm_dtype_race" }
-q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -I ../jinja2.mojo/src -o build/q4_validate && ./build/q4_validate" }
-int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -I ../jinja2.mojo/src -o build/int4_quality && ./build/int4_quality" }
+q4-validate = { cmd = "mkdir -p build && mojo build tests/manual/q4_validate.mojo -I src -o build/q4_validate && ./build/q4_validate" }
+int4-quality = { cmd = "mkdir -p build && mojo build tests/manual/int4_quality.mojo -I src -o build/int4_quality && ./build/int4_quality" }
 # End-to-end Gemma serving-path smoke test (template -> tokenizer -> persistent
 # KV session -> prefill/decode -> detokenize), the exact stack server.gen_full
 # drives. Loads the ~7 GB int4 model (needs the gemma-4-12B checkpoint cached).
-gemma-serve-smoke = { cmd = "mkdir -p build && mojo build tests/manual/gemma_serve_smoke.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/gemma_serve_smoke && ./build/gemma_serve_smoke" }
+gemma-serve-smoke = { cmd = "mkdir -p build && mojo build tests/manual/gemma_serve_smoke.mojo -I src -I ../flare -o build/gemma_serve_smoke && ./build/gemma_serve_smoke" }
 # Coherence smoke test for the gemma-4 e2b speculative-decode draft model (int4).
-e2b-smoke = { cmd = "mkdir -p build && mojo build tests/manual/e2b_smoke.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/e2b_smoke && ./build/e2b_smoke" }
+e2b-smoke = { cmd = "mkdir -p build && mojo build tests/manual/e2b_smoke.mojo -I src -I ../flare -o build/e2b_smoke && ./build/e2b_smoke" }
 # Per-layer numeric validation of the e2b forward vs HF gemma4 (ids [2,4521,1902];
 # compare against max-backend/.scratch/e2b_hf_ref.py — argmax should be 236787).
-e2b-debug = { cmd = "mkdir -p build && mojo build tests/manual/e2b_debug.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/e2b_debug && ./build/e2b_debug" }
+e2b-debug = { cmd = "mkdir -p build && mojo build tests/manual/e2b_debug.mojo -I src -I ../flare -o build/e2b_debug && ./build/e2b_debug" }
 # Speculative decode: e2b draft verifying against the 12B target (both int4 co-resident).
 # Asserts greedy-exact vs `generate`, reports tok/s + draft acceptance + speedup.
-e2b-spec = { cmd = "mkdir -p build && mojo build tests/manual/e2b_spec.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/e2b_spec && ./build/e2b_spec" }
+e2b-spec = { cmd = "mkdir -p build && mojo build tests/manual/e2b_spec.mojo -I src -I ../flare -o build/e2b_spec && ./build/e2b_spec" }
 # Gemma prompt render vs transformers (text + thinking + tool defs + tool_calls
 # + tool results, incl. multi-turn), CPU-only — no weights/GPU. Validates
 # src/gemma_chat.mojo (+ gemma_tools.mojo) against tests/fixtures/gemma.
-gemma-template-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_template_test.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/gemma_template_test && ./build/gemma_template_test" }
+gemma-template-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_template_test.mojo -I src -I ../flare -o build/gemma_template_test && ./build/gemma_template_test" }
 # Per-layer numeric validation of a Gemma decoder layer (sliding + full) vs the
 # captured HF reference. Needs the gemma checkpoint + Metal GPU. -I tests/gates:
 # imports the gate-only fixture helpers (testio).
@@ -179,7 +181,7 @@ gemma-layer-test = { cmd = "mkdir -p build && mojo build tests/manual/gemma_laye
 gemma-dump = { cmd = "mkdir -p build && mojo build tests/manual/gemma_dump.mojo -I src -I tests/gates -o build/gemma_dump && ./build/gemma_dump" }
 # Speculative-decode parity + timing: greedy `generate` vs prompt-lookup
 # `generate_spec` on Gemma 4 12B int4 (must be bit-identical; reports speedup).
-spec-decode = { cmd = "mkdir -p build && mojo build tests/manual/spec_decode.mojo -I src -I ../jinja2.mojo/src -I ../flare -o build/spec_decode && ./build/spec_decode" }
+spec-decode = { cmd = "mkdir -p build && mojo build tests/manual/spec_decode.mojo -I src -I ../flare -o build/spec_decode && ./build/spec_decode" }
 
 # Cross-engine benchmark (millfolio vs mlx_lm.server vs Ollama): TTFT, decode
 # tok/s, cold/warm prefix. Stdlib python, no GPU build. Start the servers first
@@ -189,10 +191,10 @@ bench = { cmd = "python3 bench/bench.py" }
 # Phase 6a end-to-end chat CLI (ARCHITECTURE.md §6): prompt -> text, pure Mojo on
 # the GPU. Usage: pixi run chat -- "Your question". Needs tok-capture (tokenizer
 # tables) + a checkpoint path ($QWEN_SAFETENSORS or forward-capture's meta).
-chat = { cmd = "mkdir -p build && mojo build src/main.mojo -I ../jinja2.mojo/src -o build/chat && ./build/chat" }
+chat = { cmd = "mkdir -p build && mojo build src/main.mojo -o build/chat && ./build/chat" }
 
 # Phase 6b OpenAI-compatible HTTP server, pure Mojo on the GPU over flare.
-# Listens on 127.0.0.1:8000. -I ../jinja2.mojo/src: chat templating (§5.3). -I ../flare:
+# Listens on 127.0.0.1:8000.: chat templating (§5.3). -I ../flare:
 # the kqueue reactor / Router / SSE, reused from max-backend (§11 #11 — the fork
 # now builds under 1.0.0b2). flare-tls builds libflare_tls.so (raw socket I/O +
 # TLS FFI) from the fork's own C++ source against the env's OpenSSL. flare's
@@ -203,12 +205,12 @@ flare-tls = { cmd = "clang++ -O2 -std=c++17 -fPIC -DNDEBUG -shared -o $CONDA_PRE
 # pass its HF id (resolved from the local cache) or a checkpoint path:
 #   pixi run serve -- Qwen/Qwen2.5-3B-Instruct
 # The server reports the served model at /v1/models.
-serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/millfolio-inference && ./build/millfolio-inference", depends-on = ["flare-tls"] }
+serve = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../flare -o build/millfolio-inference && ./build/millfolio-inference", depends-on = ["flare-tls"] }
 
 # Boot-status smoke (manual — needs a Metal machine to BUILD the binary; the
 # missing-model path it exercises never touches the GPU at runtime): a bogus
 # model id must yield instant /v1/status state=error + 503s + a live process.
-boot-smoke = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../jinja2.mojo/src -I ../flare -o build/millfolio-inference && bash tests/manual/boot_status_smoke.sh", depends-on = ["flare-tls"] }
+boot-smoke = { cmd = "mkdir -p build && mojo build src/server.mojo -I ../flare -o build/millfolio-inference && bash tests/manual/boot_status_smoke.sh", depends-on = ["flare-tls"] }
 
 # Native-Mojo Qwen weights downloader — no huggingface_hub / no Python HF wheel.
 # Fetches safetensors (single-file for 0.5B, sharded for 3B) + config + tokenizer

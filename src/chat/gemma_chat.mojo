@@ -15,7 +15,7 @@ sends): strip_thinking of past assistant content, and multimodal content parts
 (text parts are concatenated; image/audio/video are dropped).
 """
 
-from value import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
+from jinja2 import Value, VNONE, VBOOL, VINT, VFLOAT, VSTR, VLIST, VMAP
 from chat.gemma_tools import format_argument, format_gemma_tools, dictsort, Q
 
 

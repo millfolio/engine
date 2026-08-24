@@ -11,9 +11,9 @@ from runtime.engine import generate, generate_spec_draft
 from chat import load_chat_template, render_value
 from tokenizer import load_gemma_tokenizer_json, Tokenizer
 from runtime.tensor_ops import probe_simd_gemm
-from template import Template
+from jinja2 import Template
 from runtime.model_iface import FAMILY_GEMMA
-from json import parse_json
+from jinja2 import parse_json
 
 comptime SNAP12B = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-12B-it-bf16/snapshots/afb7b215e9fe3b3eaef462b27d5c9d9b1ba0565b"
 comptime SNAPE2B = "/Users/mseritan/.cache/huggingface/hub/models--mlx-community--gemma-4-e2b-it-bf16/snapshots/22a2753af6114b0c364f09921771b458e40b9e09"
