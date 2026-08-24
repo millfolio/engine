@@ -3,7 +3,7 @@ name: test
 # Pure-CPU gate suite for the inference server: <tool_call> parsing and the
 # bind-before-load property (connections are accepted while weights load instead
 # of refused). No GPU, weights, or torch fixtures — just the Mojo toolchain + the
-# flare/json/jinja2 siblings. `pixi run test` is the same target a dev runs.
+# flare/json siblings (jinja2 is a pixi source dependency). `pixi run test` is the same target a dev runs.
 # (GPU/weights gates stay manual — see CLAUDE.md.)
 on:
   push:
@@ -15,8 +15,8 @@ jobs:
   test:
     runs-on: macos-14
     steps:
-      # Lay the repos out as siblings, matching the `-I ../flare -I ../json
-      #` the gates build against.
+      # Lay the repos out as siblings, matching the `-I ../flare -I ../json`
+      # the gates build against; jinja2 comes in as a pixi source dependency.
       - uses: actions/checkout@v6
         with: { path: engine }
       - uses: actions/checkout@v6
@@ -24,7 +24,6 @@ jobs:
       - uses: actions/checkout@v6
         with: { repository: millfolio/json, path: json }
       - uses: actions/checkout@v6
-        with: { repository: millfolio/jinja2.mojo, path: jinja2.mojo }
 
       - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
         with:
