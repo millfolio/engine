@@ -18,14 +18,11 @@ jobs:
     runs-on: macos-14
     steps:
       # Lay the three repos out as siblings, matching the dev layout the pixi
-      # `flare-tls` task and the package script assume (../jinja2.mojo, ../flare).
+      # `flare-tls` task and the package script assume (../flare); jinja2 comes
+      # from the pixi env as a source dependency.
       - uses: actions/checkout@v6
         with:
           path: inference-server
-      - uses: actions/checkout@v6
-        with:
-          repository: millfolio/jinja2.mojo
-          path: jinja2.mojo
       - uses: actions/checkout@v6
         with:
           repository: millfolio/flare
