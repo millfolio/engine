@@ -23,7 +23,6 @@ jobs:
         with: { repository: millfolio/flare, path: flare }
       - uses: actions/checkout@v6
         with: { repository: millfolio/json, path: json }
-      - uses: actions/checkout@v6
 
       - uses: prefix-dev/setup-pixi@5185adfbffb4bd703da3010310260805d89ebb11 # v0.9.6
         with:
